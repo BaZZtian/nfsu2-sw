@@ -213,6 +213,16 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   (`xbox_nx_pad_rumble`: left = low band 160 Hz, right = high band 320 Hz,
   handheld + player 1), SDL rumble on Linux. Only changes are sent.
   `RECOMP_RUMBLE=0` off, `RECOMP_RUMBLE_TRACE=1` logs each change.
+  Strength: Options -> Gameplay -> Vibration Off/10%..100% (2026-10-11,
+  recomp_manual.c sub_000CEA00 wrapper, same row recipe as Video; scales
+  both motors in usb_gamepad_output via `usb_gamepad_rumble_pct`; saved as
+  vibration=<pct> in nfsu2x_options.txt). Texts (text_patch.c s_always):
+  "Keyboard Configuration" -> Vibration, Crowds/High/Medium/Refresh/World
+  Detail/Particle System/Game Filters/Wheel Options x2/Wheel Configuration
+  -> 10%..100% (each hash only in the 28 string tables). Linux path: Main
+  Menu (after the profile OK, b is harmless) right x6 -> a (Options opens
+  on Audio) -> right x2 (Gameplay) -> a -> down x7; FE input lags a few s
+  under lavapipe, so space presses 2-5 s apart.
 - **Render scale:** `RECOMP_GL_SCALE=<k>` (0.5..4, fractions like 1.5 ok;
   nv2a_gl.c and nv2a_vk.c) stores every surface at that multiple, rounded
   (`GlSurf/VkSurf.pw/ph`; `w/h` stay the title's pixels

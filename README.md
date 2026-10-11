@@ -11,7 +11,7 @@ instruction by instruction to C and running natively, with no emulator.
 ![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?logo=linux&logoColor=black)
 ![Vulkan](https://img.shields.io/badge/Vulkan-1.3-AC162C?logo=vulkan&logoColor=white)
 ![OpenGL](https://img.shields.io/badge/OpenGL-renderer-5586A4?logo=opengl&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.5.5-blue)
+![Version](https://img.shields.io/badge/version-0.5.6-blue)
 
 [Features](#-features) · [Playing on Switch](#-playing-on-switch) · [Building](#%EF%B8%8F-building) · [Configuration](#%EF%B8%8F-configuration) · [Status](#-status)
 
@@ -43,7 +43,8 @@ instruction by instruction to C and running natively, with no emulator.
 - 🔊 **Audio** through an emulated Xbox APU, with 5.1 downmixed to stereo
 - 👥 **Two-player split screen**, with Joy-Con pairs or one sideways Joy-Con
   per player
-- 📳 **Rumble** on Switch HD rumble and SDL controllers
+- 📳 **Rumble** on Switch HD rumble and SDL controllers, strength set in
+  **Options → Gameplay → Vibration** (Off, 10%-100%)
 - 🔤 **Switch wording** in the menus (Start → `+`, no Xbox Live or hard-disk
   names)
 - 💾 Saves stay next to the game in `game/UDATA`

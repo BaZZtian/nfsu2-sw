@@ -46,6 +46,18 @@ static const struct { uint32_t hash; const char *text; } s_always[] = {
     { 0xA7A683ACu, "4x" },                       /* "Car Shadow" */
     { 0x6F2C7417u, "8x" },                       /* "Light Trails" */
     { 0x62925361u, "16x" },                      /* "Light Glow" */
+    /* Options -> Gameplay row */
+    { 0x5CF08EB7u, "Vibration" },                /* "Keyboard Configuration" */
+    { 0x06CC3750u, "10%" },                      /* "Crowds" */
+    { 0x612AF8A6u, "20%" },                      /* "High" */
+    { 0x632B8DA7u, "30%" },                      /* "Medium" */
+    { 0x130D90D1u, "40%" },                      /* "Refresh" */
+    { 0xBDE2E94Bu, "50%" },                      /* "World Detail" */
+    { 0x2522A4E9u, "60%" },                      /* "Particle System" */
+    { 0xF6A08779u, "70%" },                      /* "Game Filters" */
+    { 0x4DEAB931u, "80%" },                      /* "Wheel Options" */
+    { 0x92423B95u, "90%" },                      /* "Wheel Options" */
+    { 0x14D4BD3Bu, "100%" },                     /* "Wheel Configuration" */
 };
 
 static int s_switch_words;

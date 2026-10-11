@@ -1686,7 +1686,11 @@ void sub_0033518D(void)
  * working directory elsewhere; reflections=, scale=, fxaa=, aniso=,
  * square=), not in the game profile; loaded at boot
  * (nfsu2_options_load, main.c). RECOMP_VK_CUBE=0 still forces the
- * reflections off in the renderer. */
+ * reflections off in the renderer.
+ *
+ * Options -> Gameplay (sub_000CEA00, same row recipe) gets Vibration:
+ * Off, 10% .. 100% (default), scaling both motors of every rumble report
+ * (usb_gamepad_rumble_pct, usb_gamepad.c); vibration= in the same file. */
 #ifdef __SWITCH__
 #  define NFSU2_OPTIONS_FILE "sdmc:/switch/nfsu2x/nfsu2x_options.txt"
 #else
@@ -1706,7 +1710,9 @@ extern volatile int nv2a_vk_aniso;
 extern volatile int nv2a_vk_square;
 #endif
 extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
+extern volatile int usb_gamepad_rumble_pct;
 extern void sub_000CE8D0_gen(void);
+extern void sub_000CEA00_gen(void);
 extern void sub_000B5140_gen(void);
 extern void sub_000B51A0_gen(void);
 extern void sub_0009B720_gen(void);
@@ -1720,6 +1726,7 @@ static int s_scale_saved;               /* nfsu2x_options.txt had scale= */
 static int s_fxaa = 1;                  /* 0 off, 1 on */
 static int s_aniso_idx = 4;             /* into s_aniso_lvl: 16x */
 static int s_square = 1;                /* 0 off, 1 on */
+static int s_vib_idx = 10;              /* vibration in 10% steps: 100% */
 
 typedef struct {
     uint32_t label;                     /* text hashes, see text_patch.c */
@@ -1728,6 +1735,7 @@ typedef struct {
     int *value;
     void (*changed)(void);
     uint32_t vtable;                    /* guest copy of ROW_VTABLE */
+    int gameplay;                       /* on the Gameplay screen, not Video */
 } OptRow;
 
 static void refl_changed(void)
@@ -1735,6 +1743,11 @@ static void refl_changed(void)
 #ifdef NFSU2_VULKAN
     nv2a_vk_cube_maps = s_refl;
 #endif
+}
+
+static void vib_changed(void)
+{
+    usb_gamepad_rumble_pct = s_vib_idx * 10;
 }
 
 #ifdef NFSU2_VULKAN
@@ -1759,14 +1772,20 @@ static const uint32_t s_scale_texts[] = {
 static const uint32_t s_aniso_texts[] = {
     0x0000CCFAu, 0xB55E7665u, 0xA7A683ACu, 0x6F2C7417u, 0x62925361u,    /* Off, 2x .. 16x */
 };
+static const uint32_t s_vib_texts[] = {
+    0x0000CCFAu, 0x06CC3750u, 0x612AF8A6u, 0x632B8DA7u, 0x130D90D1u,    /* Off, 10% .. 40% */
+    0xBDE2E94Bu, 0x2522A4E9u, 0xF6A08779u, 0x4DEAB931u, 0x92423B95u,    /* 50% .. 90% */
+    0x14D4BD3Bu,                                                        /* 100% */
+};
 static OptRow s_rows[] = {
-    { 0x8FE9288Eu, s_refl_texts, 2, &s_refl, refl_changed, 0 },        /* Car Reflections */
+    { 0x8FE9288Eu, s_refl_texts, 2, &s_refl, refl_changed, 0, 0 },     /* Car Reflections */
 #ifdef NFSU2_VULKAN
-    { 0x4AC50BCFu, s_scale_texts, 4, &s_scale_idx, scale_changed, 0 }, /* Resolution Scale */
-    { 0x4CD775ACu, s_refl_texts, 2, &s_fxaa, picture_changed, 0 },     /* Anti-Aliasing */
-    { 0x4E57D355u, s_aniso_texts, 5, &s_aniso_idx, picture_changed, 0 }, /* Anisotropic */
-    { 0xA9C27DFDu, s_refl_texts, 2, &s_square, picture_changed, 0 },   /* Square Pixels */
+    { 0x4AC50BCFu, s_scale_texts, 4, &s_scale_idx, scale_changed, 0, 0 }, /* Resolution Scale */
+    { 0x4CD775ACu, s_refl_texts, 2, &s_fxaa, picture_changed, 0, 0 },  /* Anti-Aliasing */
+    { 0x4E57D355u, s_aniso_texts, 5, &s_aniso_idx, picture_changed, 0, 0 }, /* Anisotropic */
+    { 0xA9C27DFDu, s_refl_texts, 2, &s_square, picture_changed, 0, 0 }, /* Square Pixels */
 #endif
+    { 0x5CF08EB7u, s_vib_texts, 11, &s_vib_idx, vib_changed, 0, 1 },   /* Vibration */
 };
 #define N_ROWS ((int)(sizeof s_rows / sizeof s_rows[0]))
 
@@ -1774,12 +1793,13 @@ static void options_log(void)
 {
 #ifdef NFSU2_VULKAN
     fprintf(stderr, "[options] car reflections %s, resolution scale %d%%%s, anti-aliasing %s,"
-            " anisotropic %dx, square pixels %s\n",
+            " anisotropic %dx, square pixels %s, vibration %d%%\n",
             s_refl ? "on" : "off", s_scale_pct[s_scale_idx],
             nv2a_vk_scale_pct ? "" : " (RECOMP_GL_SCALE)", s_fxaa ? "on" : "off",
-            s_aniso_lvl[s_aniso_idx], s_square ? "on" : "off");
+            s_aniso_lvl[s_aniso_idx], s_square ? "on" : "off", s_vib_idx * 10);
 #else
-    fprintf(stderr, "[options] car reflections %s\n", s_refl ? "on" : "off");
+    fprintf(stderr, "[options] car reflections %s, vibration %d%%\n",
+            s_refl ? "on" : "off", s_vib_idx * 10);
 #endif
 }
 
@@ -1795,6 +1815,10 @@ void nfsu2_options_load(void)
                 s_refl = line[12] != '0';
             else if (!strncmp(line, "fxaa=", 5))
                 s_fxaa = line[5] != '0';
+            else if (!strncmp(line, "vibration=", 10)) {
+                int v = atoi(line + 10);
+                s_vib_idx = v < 0 ? 0 : v > 100 ? 10 : (v + 5) / 10;
+            }
             else if (!strncmp(line, "square=", 7))
                 s_square = line[7] != '0';
             else if (!strncmp(line, "aniso=", 6)) {
@@ -1815,6 +1839,7 @@ void nfsu2_options_load(void)
         fclose(f);
     }
     refl_changed();
+    vib_changed();
 #ifdef NFSU2_VULKAN
     {
         const char *e = getenv("RECOMP_GL_SCALE");
@@ -1842,7 +1867,7 @@ static void options_save(void)
         fprintf(stderr, "[options] cannot write " NFSU2_OPTIONS_FILE "\n");
         return;
     }
-    fprintf(f, "reflections=%d\n", s_refl);
+    fprintf(f, "reflections=%d\nvibration=%d\n", s_refl, s_vib_idx * 10);
     if (s_scale_saved)
         fprintf(f, "scale=%d\n", s_scale_pct[s_scale_idx]);
 #ifdef NFSU2_VULKAN
@@ -1876,37 +1901,17 @@ static void refl_views(void)
             MEM8(v + 8) = 0;
 }
 
-/* Video screen (thiscall, ecx = options screen): the original rows, then
- * ours. The screen shows a colour-calibration panel in the lower half --
- * FE objects ColorCal_Logo, ColorCal_Blurb ("lower the brightness of your
- * television") and Colour_Calibration_Backing (names at 0x34F424/0x34F414/
- * 0x34F3F8) -- over list rows 5 and up, where our rows land; they are
- * hidden again, as the screen itself hides objects (sub_00118CE0). */
-static const uint32_t s_colorcal_names[] = { 0x0034F424u, 0x0034F414u, 0x0034F3F8u };
-
-void sub_000CE8D0(void)
+/* Appends our rows for one screen (gameplay 0 = Video, 1 = Gameplay) to
+ * an options screen, as its constructor adds its own. */
+static void add_rows(uint32_t screen, int gameplay)
 {
-    uint32_t screen = ecx, row;
+    uint32_t row;
     int i;
 
-    sub_000CE8D0_gen();
-    for (i = 0; i < 3; i++) {
-        PUSH32(esp, s_colorcal_names[i]);   /* name hash, cdecl */
-        PUSH32(esp, 0x000CE9A5u);
-        sub_001160C0();
-        esp += 4;
-        PUSH32(esp, eax);                   /* FE object by hash, cdecl */
-        PUSH32(esp, MEM32(screen + 4u));
-        PUSH32(esp, 0x000CE9ACu);
-        sub_00144310();
-        esp += 8;
-        PUSH32(esp, eax);                   /* hide it, cdecl */
-        PUSH32(esp, 0x000CE918u);
-        sub_00118CE0();
-        esp += 4;
-    }
     for (i = 0; i < N_ROWS; i++) {
         OptRow *o = &s_rows[i];
+        if (o->gameplay != gameplay)
+            continue;
         if (!o->vtable) {
             o->vtable = xbox_ContiguousAlloc(ROW_VTABLE_SIZE, 16);
             if (!o->vtable)
@@ -1936,6 +1941,47 @@ void sub_000CE8D0(void)
         PUSH32(esp, 0x000CEB23u);
         sub_0015B2E0();                     /* thiscall, pops its 2 */
     }
+}
+
+/* Video screen (thiscall, ecx = options screen): the original rows, then
+ * ours. The screen shows a colour-calibration panel in the lower half --
+ * FE objects ColorCal_Logo, ColorCal_Blurb ("lower the brightness of your
+ * television") and Colour_Calibration_Backing (names at 0x34F424/0x34F414/
+ * 0x34F3F8) -- over list rows 5 and up, where our rows land; they are
+ * hidden again, as the screen itself hides objects (sub_00118CE0). */
+static const uint32_t s_colorcal_names[] = { 0x0034F424u, 0x0034F414u, 0x0034F3F8u };
+
+void sub_000CE8D0(void)
+{
+    uint32_t screen = ecx;
+    int i;
+
+    sub_000CE8D0_gen();
+    for (i = 0; i < 3; i++) {
+        PUSH32(esp, s_colorcal_names[i]);   /* name hash, cdecl */
+        PUSH32(esp, 0x000CE9A5u);
+        sub_001160C0();
+        esp += 4;
+        PUSH32(esp, eax);                   /* FE object by hash, cdecl */
+        PUSH32(esp, MEM32(screen + 4u));
+        PUSH32(esp, 0x000CE9ACu);
+        sub_00144310();
+        esp += 8;
+        PUSH32(esp, eax);                   /* hide it, cdecl */
+        PUSH32(esp, 0x000CE918u);
+        sub_00118CE0();
+        esp += 4;
+    }
+    add_rows(screen, 0);
+}
+
+/* Gameplay screen (thiscall, ecx = options screen): its rows, then ours. */
+void sub_000CEA00(void)
+{
+    uint32_t screen = ecx;
+
+    sub_000CEA00_gen();
+    add_rows(screen, 1);
 }
 
 /* Row refresh (thiscall): label and value text. */
