@@ -14,6 +14,7 @@
 #   DEVKITPRO        default /opt/devkitpro (switch-dev, switch-sdl2, switch-mesa)
 #   XBOXRECOMP_DIR   toolkit (default: the vendored xboxrecomp/)
 #   NFSU2_GEN_DIR    lifted C from tools/regen.sh (default /root/nfsu2x/gen)
+#   NFSU2_REGION     US (default) or EU, matching the generated translation
 #   NFSU2_GAME_SRC   extracted disc to stage (default /root/nfsu2x/game)
 #   SD_ROOT          staging SD root (default <repo>/switch_sd)
 #   BUILD_DIR        default /root/nfsu2x/build-switch
@@ -81,7 +82,7 @@ fi
 cmake -S "$REPO" -B "$BUILD" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DXBOXRECOMP_DIR="$TK" -DNFSU2_GEN_DIR="$GEN" \
+    -DXBOXRECOMP_DIR="$TK" -DNFSU2_GEN_DIR="$GEN" -DNFSU2_REGION="${NFSU2_REGION:-US}" \
     -DNFSU2_SWITCH_ICON="$REPO/assets/icon.jpg" "${VK_ARGS[@]}" "${FF_ARGS[@]}" \
     "${LTO_ARGS[@]}" >/dev/null
 ninja -C "$BUILD" -j"$JOBS"
