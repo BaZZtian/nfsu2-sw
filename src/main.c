@@ -28,6 +28,7 @@
 
 #ifdef __SWITCH__
 /* libnx lives in switch_nx.c: <switch.h> and the Win32 vocabulary collide. */
+#include "switch_heap.h"
 void switch_boot(void);
 void switch_shutdown(void);
 void switch_error_dialog(const char *msg, const char *details);
@@ -273,6 +274,12 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
     switch_boot();
+    if (!nfsu2_switch_heap_ready()) {
+        fatal("Insufficient physical memory for Xbox shared mappings. "
+              "Use title takeover and see nfsu2x_log.txt.");
+        switch_shutdown();
+        return 1;
+    }
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 16u * 1024 * 1024);
     if (pthread_create(&th, &attr, game_thread, &rc) == 0)
