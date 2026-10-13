@@ -1690,7 +1690,16 @@ void sub_0033518D(void)
  *
  * Options -> Gameplay (sub_000CEA00, same row recipe) gets Vibration:
  * Off, 10% .. 100% (default), scaling both motors of every rumble report
- * (usb_gamepad_rumble_pct, usb_gamepad.c); vibration= in the same file. */
+ * (usb_gamepad_rumble_pct, usb_gamepad.c); vibration= in the same file.
+ *
+ * Options -> Audio volumes (issue #21): the Xbox never keeps them. They
+ * are floats in the options object at 0x406CA0 (+0x48..+0x83, the block
+ * at 0x406CE8 the audio manager [0x391F84] gets in sub_00076A70), and the
+ * profile writer sub_001371B0 copies the object in pieces around that
+ * block; nothing reads them back on load either. So they live in the same
+ * file (menu_music= .. engine=, 0..1): written into the block when the
+ * profile is first applied, saved when a slider hands the block to
+ * sub_00076A70 with a changed value. */
 #ifdef __SWITCH__
 #  define NFSU2_OPTIONS_FILE "sdmc:/switch/nfsu2x/nfsu2x_options.txt"
 #else
@@ -1701,6 +1710,7 @@ void sub_0033518D(void)
 #define ROW_VTABLE      0x0034EFD0u     /* Speedometer Units */
 #define ROW_VTABLE_SIZE 0x48u
 #define ENVMAP_TABLE    0x003F2AD0u     /* six cube-face view pointers */
+#define AUDIO_VOLUMES   0x00406CE8u     /* options object +0x48 */
 
 #ifdef NFSU2_VULKAN
 extern volatile int nv2a_vk_cube_maps;
@@ -1716,9 +1726,21 @@ extern void sub_000CEA00_gen(void);
 extern void sub_000B5140_gen(void);
 extern void sub_000B51A0_gen(void);
 extern void sub_0009B720_gen(void);
+extern void sub_00076A70_gen(void);
 
 static const int s_scale_pct[] = { 100, 150, 200, 250 };
 static const int s_aniso_lvl[] = { 1, 2, 4, 8, 16 };
+
+/* Options -> Audio rows, top to bottom. */
+static const struct { const char *key; uint32_t va; } s_vol_rows[] = {
+    { "menu_music", 0x00406CF0u }, { "game_music", 0x00406CF4u },
+    { "speech", 0x00406CECu }, { "sfx", 0x00406CF8u },
+    { "tires", 0x00406D00u }, { "engine", 0x00406CFCu },
+};
+#define N_VOLS ((int)(sizeof s_vol_rows / sizeof s_vol_rows[0]))
+static float s_vol[N_VOLS];             /* from the file, then as last saved */
+static int s_vol_have[N_VOLS];          /* s_vol[i] is known */
+static int s_vol_ready;                 /* the title has applied the block */
 
 static int s_refl = 1;                  /* 0 off, 1 on */
 static int s_scale_idx = 1;             /* into s_scale_pct: 1.5x */
@@ -1811,6 +1833,14 @@ void nfsu2_options_load(void)
 
     if (f) {
         while (fgets(line, sizeof line, f)) {
+            char *eq = strchr(line, '=');
+            for (i = 0; i < N_VOLS && eq; i++)
+                if ((size_t)(eq - line) == strlen(s_vol_rows[i].key) &&
+                    !strncmp(line, s_vol_rows[i].key, (size_t)(eq - line))) {
+                    double v = strtod(eq + 1, NULL);
+                    s_vol[i] = (float)(v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v);
+                    s_vol_have[i] = 1;
+                }
             if (!strncmp(line, "reflections=", 12))
                 s_refl = line[12] != '0';
             else if (!strncmp(line, "fxaa=", 5))
@@ -1862,6 +1892,7 @@ void nfsu2_options_load(void)
 
 static void options_save(void)
 {
+    int i;
     FILE *f = fopen(NFSU2_OPTIONS_FILE, "w");
     if (!f) {
         fprintf(stderr, "[options] cannot write " NFSU2_OPTIONS_FILE "\n");
@@ -1873,6 +1904,9 @@ static void options_save(void)
 #ifdef NFSU2_VULKAN
     fprintf(f, "fxaa=%d\naniso=%d\nsquare=%d\n", s_fxaa, s_aniso_lvl[s_aniso_idx], s_square);
 #endif
+    for (i = 0; i < N_VOLS; i++)
+        if (s_vol_have[i])
+            fprintf(f, "%s=%.2f\n", s_vol_rows[i].key, s_vol[i]);
     fclose(f);
 }
 
@@ -2043,6 +2077,44 @@ void sub_0009B720(void)
 {
     sub_0009B720_gen();
     refl_views();
+}
+
+/* Audio manager: take the volume block (thiscall, 1 arg, ret 4). The
+ * block is filled by a static constructor after boot, and the first call
+ * comes when the profile is applied (sub_00141070): the saved volumes go
+ * in there. After that every Audio slider calls it once it has stored its
+ * value; keep what changed. */
+void sub_00076A70(void)
+{
+    uint32_t blk = MEM32(esp + 4);
+    int i, restored = 0, changed = 0;
+
+    if (blk == AUDIO_VOLUMES && !s_vol_ready) {
+        for (i = 0; i < N_VOLS; i++) {
+            if (s_vol_have[i])
+                MEMF(s_vol_rows[i].va) = s_vol[i];
+            else
+                s_vol[i] = MEMF(s_vol_rows[i].va);
+            s_vol_have[i] = 1;
+        }
+        s_vol_ready = restored = 1;
+    }
+    sub_00076A70_gen();
+    if (blk != AUDIO_VOLUMES)
+        return;
+    for (i = 0; i < N_VOLS; i++)
+        if (MEMF(s_vol_rows[i].va) != s_vol[i]) {
+            s_vol[i] = MEMF(s_vol_rows[i].va);
+            changed = 1;
+        }
+    if (changed)
+        options_save();
+    if (restored || changed) {
+        fprintf(stderr, "[options] volumes");
+        for (i = 0; i < N_VOLS; i++)
+            fprintf(stderr, " %s %d%%", s_vol_rows[i].key, (int)(s_vol[i] * 100.0f + 0.5f));
+        fprintf(stderr, "%s\n", changed ? "" : " (restored)");
+    }
 }
 
 /* ── Manual function overrides ─────────────────────────────── */
