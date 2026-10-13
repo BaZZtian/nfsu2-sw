@@ -1,2 +1,0 @@
-# Unified patch context lines intentionally contain a single space.
-pal/source.patch whitespace=-blank-at-eol
