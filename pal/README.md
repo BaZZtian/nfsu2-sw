@@ -4,6 +4,8 @@ This profile imports the EU prototype's region-specific hooks and runtime fixes 
 
 The supported EU executable is 4,038,656 bytes, SHA-256 `34e2a0dbc722302d12b05b12fbaf8d7c3ddd024183f3e33b96fff09156b29604`, entry `0x0021B77E`. It needs its own translated executable; selecting English or German does not make a US translation compatible with an EU disc.
 
+**Disc compatibility:** The PAL prototype NRO and this EU source profile support only the verified European executable. They do not run NTSC-U game data. Use the separate upstream US build with the matching US disc. Both builds require extracted disc files (`default.xbe`, `NFSUNDER/`, etc.); ISO files are not loaded directly. There is no universal US/EU NRO in this contribution, and other EU executable revisions are not supported by this profile.
+
 Included PAL changes cover movie/audio integration, D3D/input callbacks, frame fences, native matrix helpers, video-option rows. The game retains its normal language chooser, without an automatic selection or language override. The source profile retains the PAL prototype's initialization errors, memory reserve, renderer caches and synchronization checks.
 
 ## Preparing sources
