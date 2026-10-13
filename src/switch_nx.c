@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "apu_xaudio2.h"
+#include "switch_heap.h"
 
 #define NFSU2_SWITCH_DIR "sdmc:/switch/nfsu2x"
 
@@ -1120,9 +1121,12 @@ void switch_boot(void)
                         : "applet mode: launch via a game title (hold R) for full memory",
                (unsigned long)(total >> 20), (unsigned long)(used >> 20));
     }
-    clk_apply();
-    loader_start();
-    prof_start();
+    nfsu2_switch_heap_report();
+    if (nfsu2_switch_heap_ready()) {
+        clk_apply();
+        loader_start();
+        prof_start();
+    }
 }
 
 void switch_error_dialog(const char *msg, const char *details)
