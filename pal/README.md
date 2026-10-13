@@ -1,27 +1,38 @@
-# PAL/DE source profile (draft)
+# PAL-EU support in the shared port
 
-This profile imports the EU prototype's region-specific hooks and runtime fixes as an opt-in source tree. The normal NTSC-U sources and generation commands remain available. The shared Switch heap correction is also proposed directly in `src/switch_heap.c`.
+US and EU builds use the same source tree, Xbox runtime, renderers, audio decoder, Switch platform layer and heap bootstrap. Region-specific hooks live under `src/regions/eu/`; selecting EU does not copy or patch a separate runtime tree.
 
-The supported EU executable is 4,038,656 bytes, SHA-256 `34e2a0dbc722302d12b05b12fbaf8d7c3ddd024183f3e33b96fff09156b29604`, entry `0x0021B77E`. It needs its own translated executable; selecting English or German does not make a US translation compatible with an EU disc.
+## Supported discs
 
-**Disc compatibility:** The PAL prototype NRO and this EU source profile support only the verified European executable. They do not run NTSC-U game data. Use the separate upstream US build with the matching US disc. Both builds require extracted disc files (`default.xbe`, `NFSUNDER/`, etc.); ISO files are not loaded directly. There is no universal US/EU NRO in this contribution, and other EU executable revisions are not supported by this profile.
+The EU build requires the tested European `default.xbe`: 4,038,656 bytes, SHA-256 `34e2a0dbc722302d12b05b12fbaf8d7c3ddd024183f3e33b96fff09156b29604`, entry `0x0021B77E`. The existing US translation uses entry `0x0021B1CE`.
 
-Included PAL changes cover movie/audio integration, D3D/input callbacks, frame fences, native matrix helpers, video-option rows. The game retains its normal language chooser, without an automatic selection or language override. The source profile retains the PAL prototype's initialization errors, memory reserve, renderer caches and synchronization checks.
+Each NRO contains one region's translation. EU and US NROs require their matching game data. Startup rejects a mismatch before guest memory mapping. Both need extracted disc files (`default.xbe`, `NFSUNDER/`, etc.); neither opens ISO files directly. Other executable revisions are unverified.
 
-## Preparing sources
+The normal game language chooser is retained. There is no forced German selection or language override.
+
+## Generation and build
+
+The portable command uses the shared upstream toolkit:
 
 ```text
-python tools/prepare_eu_source.py --xbe /path/to/EU/default.xbe --gen-dir /path/to/verified-EU-gen --output build-eu/source
+python tools/regen.py --xbe /path/to/EU/default.xbe --region EU --gen-dir /path/to/gen-eu
+cmake -S . -B build-eu -DNFSU2_REGION=EU -DNFSU2_GEN_DIR=/path/to/gen-eu -DNFSU2_VULKAN=ON
 ```
 
-`--check` validates the profile without keeping an additional source tree. Inputs are read only; the output directory must be empty. The patch is bound to its recorded upstream commit and source hashes, so an upstream change is never silently overwritten. No game data, generated game code, binaries, user saves or hardware logs are included.
+Supply the normal Switch toolchain/SDK arguments for Switch. For US, use `--region US`, `-DNFSU2_REGION=US` and a separate generated directory. `--region auto` identifies the executable during generation; the resulting NRO still contains one translation. Existing complete analysis can be supplied with `--analysis-dir`. Output must be empty; existing translations and inputs are not overwritten.
 
-Build the resulting tree with the existing Switch SDK and CMake toolchain, setting `NFSU2_GEN_DIR` to the verified EU translation and `NFSU2_VULKAN=ON` for Vulkan. `pal/nfsu2x_env.txt` supplies the PAL prototype's configuration; title takeover and shared-memory mode are required.
+Existing verified EU generated files can also be supplied with `NFSU2_GEN_DIR`. A pass-through ABI bridge is selected only when an older translation renamed the original chooser. It invokes that original chooser without selecting a language.
 
-EU regeneration from a fresh XBE and consolidation of the frozen PAL renderer with the latest upstream Vulkan implementation remain draft work. This profile is not a claim that the new upstream integration has completed a hardware playthrough.
+## Maintenance
+
+Renderer, audio, platform and runtime fixes are maintained once and compiled for both builds. New game-specific hooks may require an EU address/ABI mapping. Callback seeds and bounded CPU/I/O models are explicit; no global address offset is assumed.
+
+The Vulkan unified-memory fallback treats locality/caching as preferences and retains host visibility/coherence requirements. The optional `NVK_LOCALIZED_DISPATCH` bridge supports SDK archives whose direct Vulkan symbols are localized. It is shared by both builds and defaults off.
 
 ## Validation
 
-The PAL prototypes reached boot, movies, menus, Quick Race and Career driving with audio on a Switch. Full playthrough and remaining graphics/stability issues are unconfirmed. The imported v0.21 source includes optimizations whose hardware FPS gain is still pending verification.
+The full analysis/generation pipeline runs natively on Windows. A freshly generated EU translation produces an ELF and NRO with the shared current upstream renderer/runtime; reuse of the previous EU translation is also supported. This integration still needs a real Switch test. Previous PAL prototype observations do not establish stability or performance of this new build. Full playthrough and US hardware regression testing are pending.
 
-`python tests/switch_heap/run.py --cc clang` executes the real heap bootstrap against mocked loader/kernel services, including loader prefixes, applet budgets, resize failures and loader-return restoration. `prepare_eu_source.py --check` verifies the imported source and, when supplied, the exact existing translation hashes.
+`python tests/regions/run.py --cc clang --eu-xbe /path/to/EU/default.xbe` checks both build modes, detection and modified-input rejection. `python tests/switch_heap/run.py --cc clang` exercises the actual heap bootstrap. `python tests/vulkan_memory/run.py --cc clang` checks the renderer's allocation policy.
+
+The shared native matrix and movie-row helpers are exercised by `tests/native_matrix/run.py` and `tests/movie_row/run.py`, including overlap, signed saturation/wrap and guest register postconditions.
