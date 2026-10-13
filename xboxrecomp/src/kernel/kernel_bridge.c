@@ -770,6 +770,11 @@ void recomp_preempt(void)
 #define GUEST_CALL_ATOMIC(f) do { xbox_gil_enter(); t_gil_nopreempt++; (f)(); \
                                   t_gil_nopreempt--; xbox_gil_leave(); } while (0)
 
+int xbox_gil_interrupt_model_ready(void)
+{
+    return gil_enabled() && t_gil_depth > 0;
+}
+
 void xbox_gil_isr_begin(void) { xbox_gil_enter(); t_gil_nopreempt++; }
 void xbox_gil_isr_end(void)   { t_gil_nopreempt--; xbox_gil_leave(); }
 
