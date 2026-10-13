@@ -67,7 +67,7 @@ extern void xbe_entry_point(void);
 extern int recomp_dispatch_init(void);
 extern void xbox_path_init(const char *game_dir, const char *save_dir);
 
-#define NFSU2_ENTRY_POINT 0x0021B1CEu
+#include "game_region.h"
 
 
 #if defined(__SWITCH__)
@@ -332,6 +332,7 @@ static int game_main(void)
     /* Every periodic log line flushes to the SD card; keep the log to what
      * matters on a console. RECOMP_QUIET=0 in nfsu2x_env.txt brings it back. */
     setenv("RECOMP_QUIET", "1", 0);
+    setenv("RECOMP_NX_SHM", "1", 0);
 #endif
 
     game_dir = getenv("NFSU2_GAME_DIR");
@@ -347,6 +348,19 @@ static int game_main(void)
         return 1;
     }
     printf("XBE %s: %zu bytes\n", xbe_path, xbe_size);
+    Nfsu2Region detected = nfsu2_region_detect(xbe_data, xbe_size);
+    if (detected != nfsu2_build_region()) {
+        char message[256];
+        snprintf(message, sizeof message,
+                 "This %s build cannot run these %s game files. "
+                 "Use the matching region build and extracted disc.",
+                 nfsu2_region_name(nfsu2_build_region()), nfsu2_region_name(detected));
+        fatal(message);
+        free(xbe_data);
+        return 1;
+    }
+    printf("[BOOT] region=%s; matching translation selected at build time\n",
+           nfsu2_region_name(detected));
 
     if (!xbox_MemoryLayoutInit(xbe_data, xbe_size)) {
         fatal("Failed to initialise the Xbox memory layout "
@@ -368,7 +382,7 @@ static int game_main(void)
         const char *e = getenv("NFSU2_SIM_STEPS");
         float steps = e ? (float)atof(e) : 6.0f;
         if (steps >= 1.0f && steps <= 30.0f) {
-            float *cap = (float *)((uint8_t *)xbox_GetMemoryBase() + 0x3A4C64);
+            float *cap = (float *)((uint8_t *)xbox_GetMemoryBase() + nfsu2_sim_cap_address());
             if (*cap == 3.0f) {
                 *cap = steps;
                 printf("[BOOT] game time cap %.0f ms per frame\n", steps * 1000.0f / 60.0f);
@@ -440,7 +454,7 @@ static int game_main(void)
 
     xbox_WatchdogStart();
 
-    printf("Starting guest at 0x%08X (esp=0x%08X)\n", NFSU2_ENTRY_POINT, g_esp);
+    printf("Starting guest at 0x%08X (esp=0x%08X)\n", nfsu2_entry_point(), g_esp);
     xbox_gil_mark_main();      /* the frame-rate thread (RECOMP_GIL_EAGER) */
     xbox_gil_enter();          /* guest code from here on (kernel_bridge.c) */
     xbe_entry_point();
