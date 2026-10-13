@@ -23,6 +23,13 @@ instruction by instruction to C and running natively, with no emulator.
 > **No game data is included.** You need your own copy of the Xbox disc,
 > extracted (`default.xbe`, `NFSUNDER/`, ...).
 
+**Disc regions:** The shared source tree builds NTSC-U (default) or PAL-EU
+with `NFSU2_REGION=EU`. Each NRO contains one region's translation and needs
+the matching extracted disc; ISO files are not loaded directly. Startup
+detects mismatched game files before running the guest. See
+[PAL-EU setup and validation](pal/README.md). The game retains its normal
+language chooser. The new EU integration remains a draft pending Switch tests.
+
 ## ✨ Features
 
 - 🏁 **Native code**: the whole game runs as recompiled C, built with
