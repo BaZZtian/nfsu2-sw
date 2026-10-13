@@ -789,6 +789,13 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   system's clocks (2026-10-08, NFSU2 + Carbon): the keeper thread ran at
   0x3F and busy guest threads (0x3B) starved it; now 0x2C, plus an applet
   hook (focus/dock/perf mode/resume) that re-checks every 250 ms for 5 s.
+  Issue #25 (2026-10-13): Horizon OC (service "hoc:clk", sys-clk fork,
+  same TID 00FF0000636C6BFF) puts stock rates back every tick when the game
+  has no profile -> clock fight, console froze after ~11 min. Now: if
+  hoc:clk or sys:clk is registered (smRegisterService fails with 0x815)
+  the NFSU2_*_MHZ lines are ignored (NFSU2_CLOCK_FORCE=1 overrides); a
+  rate already >= the request is never lowered (boot or keeper); >5 resets
+  in 30 s without an applet event = give that module up.
 - **Draw merging is not possible as is:** RECOMP_MERGE_STATS (removed
   again) over a race: 0% of draws have state identical to the previous
   one; ~45% differ only in vertex-program constants (per-object matrices),
