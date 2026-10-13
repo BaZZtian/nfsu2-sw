@@ -43,6 +43,7 @@ set(GAME_SOURCES
     src/main.c
     src/recomp_manual.c
     src/switch_nx.c
+    src/switch_saltynx.c
     src/text_patch.c
     src/movie_crop.c
 src/nic.c
