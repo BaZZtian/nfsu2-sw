@@ -148,8 +148,14 @@ static VkDeviceMemory alloc_mem(VkMemoryRequirements rq, VkMemoryPropertyFlags w
     VkDeviceMemory m = VK_NULL_HANDLE;
     ai.allocationSize = rq.size;
     ai.memoryTypeIndex = mem_type(rq.memoryTypeBits, want);
-    if (ai.memoryTypeIndex == UINT32_MAX && (want & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
-        ai.memoryTypeIndex = mem_type(rq.memoryTypeBits, want & ~VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (ai.memoryTypeIndex == UINT32_MAX) {
+        /* Device locality and CPU caching are preferences. Some Switch NVK
+         * builds expose unified memory without DEVICE_LOCAL. Keep host
+         * visibility/coherence requirements when trying the allowed types. */
+        VkMemoryPropertyFlags required = want &
+            ~(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        ai.memoryTypeIndex = mem_type(rq.memoryTypeBits, required);
+    }
     if (ai.memoryTypeIndex == UINT32_MAX)
         return VK_NULL_HANDLE;
     if (vkAllocateMemory(s_dev, &ai, NULL, &m) != VK_SUCCESS)
