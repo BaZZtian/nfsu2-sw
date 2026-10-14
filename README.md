@@ -163,6 +163,7 @@ RECOMP_WIDESCREEN=0
 | `NFSU2_GL=0` | Use the executor's CPU renderer instead of the GPU renderer. |
 | `NFSU2_APU=0` | With `RECOMP_AC97_READY=plain`: no emulated APU (no sound). |
 | `NFSU2_SIM_STEPS` | Longest game-time step per frame, in 1/60 s (default 6 = 100 ms; 3 = the original 50 ms cap, which slows races below 20 fps). |
+| `NFSU2_FPS_CAP=30` | Keep the game's 30 fps cap in races and the open world (default: uncapped, up to 60 fps). |
 | `NFSU2_NATIVE_VP6` | Movie decoder: 1 = FFmpeg (default when built with it), 0 = the lifted decoder, 2 = both and compare. |
 | `NFSU2_MOVIE_FLASH=1` | Keep the opening trailer's white flash frames (shown black by default). |
 | `NFSU2_SWITCH_TEXT` | Switch wording in the menus (Start → +, no Xbox Live/hard-disk names): 1 on (Switch default), 0 off. |
