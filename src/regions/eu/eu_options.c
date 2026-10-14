@@ -19,9 +19,20 @@
 #define ROW_VTABLE 0x0034F5F8u
 #define ROW_VTABLE_SIZE 0x48u
 #define ENVMAP_TABLE 0x003F3210u
+/* The retail chooser writes the selected game language here before loading
+ * its resources (0011EF40). This reads the choice; it never selects a row. */
+int nfsu2_text_language_is_german(void)
+{
+    return MEM32(0x003A0E30u) == 2u;
+}
+
 #ifdef NFSU2_VULKAN
 extern volatile int nv2a_vk_cube_maps;
 extern volatile int nv2a_vk_scale_pct;
+extern volatile int nv2a_vk_fps_overlay;
+extern volatile int nv2a_vk_fxaa;
+extern volatile int nv2a_vk_aniso;
+extern volatile int nv2a_vk_square;
 #endif
 extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
 extern void sub_000CE7B0_gen(void);
@@ -30,7 +41,10 @@ extern void sub_000B5170_gen(void);
 extern void sub_0009B680_gen(void);
 
 static const int s_scale_pct[] = {100, 150, 200, 250};
+static const int s_aniso_lvl[] = {1, 2, 4, 8, 16};
 static int s_refl = 1, s_scale_idx = 1, s_scale_saved;
+static int s_fps;
+static int s_fxaa = 1, s_aniso_idx = 4, s_square = 1;
 typedef struct {
     uint32_t label;
     const uint32_t *texts;
@@ -51,13 +65,28 @@ static void scale_changed(void)
     nv2a_vk_scale_pct = s_scale_pct[s_scale_idx];
     s_scale_saved = 1;
 }
+static void fps_changed(void)
+{
+    nv2a_vk_fps_overlay = s_fps;
+}
+static void picture_changed(void)
+{
+    nv2a_vk_fxaa = s_fxaa;
+    nv2a_vk_aniso = s_aniso_lvl[s_aniso_idx];
+    nv2a_vk_square = s_square;
+}
 #endif
 static const uint32_t s_refl_texts[] = {0x0000CCFAu, 0x0000063Cu};
 static const uint32_t s_scale_texts[] = {0x2A2A4AB3u, 0x822E4E9Bu, 0xB55E7665u, 0xD3588630u};
+static const uint32_t s_aniso_texts[] = {0x0000CCFAu, 0xB55E7665u, 0xA7A683ACu, 0x6F2C7417u, 0x62925361u};
 static OptRow s_rows[] = {
     {0x8FE9288Eu, s_refl_texts, 2, &s_refl, refl_changed, 0},
 #ifdef NFSU2_VULKAN
     {0x4AC50BCFu, s_scale_texts, 4, &s_scale_idx, scale_changed, 0},
+    {0xA9A76BBAu, s_refl_texts, 2, &s_fps, fps_changed, 0},
+    {0x4CD775ACu, s_refl_texts, 2, &s_fxaa, picture_changed, 0},
+    {0x4E57D355u, s_aniso_texts, 5, &s_aniso_idx, picture_changed, 0},
+    {0xA9C27DFDu, s_refl_texts, 2, &s_square, picture_changed, 0},
 #endif
 };
 #define N_ROWS ((int)(sizeof s_rows / sizeof s_rows[0]))
@@ -81,12 +110,24 @@ void nfsu2_options_load(void)
     char line[128];
     FILE *f = fopen(NFSU2_OPTIONS_FILE, "r");
     int i;
+    const char *fps_env = getenv("NFSU2_FPS_OVERLAY");
+    s_fps = fps_env && !strcmp(fps_env, "1");
     if (f) {
         while (fgets(line, sizeof line, f)) {
             long value;
             if (!strncmp(line, "reflections=", 12) && parsed_value(line + 12, &value)) {
                 if (value == 0 || value == 1)
                     s_refl = (int)value;
+            } else if (!strncmp(line, "fps_display=", 12) && parsed_value(line + 12, &value)) {
+                if (value == 0 || value == 1)
+                    s_fps = (int)value;
+            } else if (!strncmp(line, "fxaa=", 5) && parsed_value(line + 5, &value)) {
+                if (value == 0 || value == 1) s_fxaa = (int)value;
+            } else if (!strncmp(line, "square=", 7) && parsed_value(line + 7, &value)) {
+                if (value == 0 || value == 1) s_square = (int)value;
+            } else if (!strncmp(line, "aniso=", 6) && parsed_value(line + 6, &value)) {
+                for (i = 0; i < 5; ++i)
+                    if (s_aniso_lvl[i] == value) s_aniso_idx = i;
             } else if (!strncmp(line, "scale=", 6) && parsed_value(line + 6, &value)) {
                 for (i = 0; i < 4; ++i)
                     if (s_scale_pct[i] == value) {
@@ -99,6 +140,8 @@ void nfsu2_options_load(void)
     }
     refl_changed();
 #ifdef NFSU2_VULKAN
+    fps_changed();
+    picture_changed();
     {
         const char *e = getenv("RECOMP_GL_SCALE");
         if (!s_scale_saved && e && *e) {
@@ -111,9 +154,10 @@ void nfsu2_options_load(void)
             nv2a_vk_scale_pct = s_scale_pct[s_scale_idx];
         }
     }
-    fprintf(stderr, "[options] car reflections %s, resolution scale %d%%%s\n",
+    fprintf(stderr, "[options] car reflections %s, resolution scale %d%%%s; FXAA %s, aniso %dx, square %s, FPS %s\n",
             s_refl ? "on" : "off", s_scale_pct[s_scale_idx],
-            nv2a_vk_scale_pct ? "" : " (RECOMP_GL_SCALE)");
+            nv2a_vk_scale_pct ? "" : " (RECOMP_GL_SCALE)", s_fxaa ? "on" : "off",
+            s_aniso_lvl[s_aniso_idx], s_square ? "on" : "off", s_fps ? "on" : "off");
 #else
     fprintf(stderr, "[options] car reflections %s\n", s_refl ? "on" : "off");
 #endif
@@ -123,6 +167,10 @@ static void options_save(void)
     FILE *f = fopen(NFSU2_OPTIONS_FILE, "w");
     if (!f) { fprintf(stderr, "[options] cannot write " NFSU2_OPTIONS_FILE "\n"); return; }
     fprintf(f, "reflections=%d\n", s_refl);
+#ifdef NFSU2_VULKAN
+    fprintf(f, "fps_display=%d\n", s_fps);
+    fprintf(f, "fxaa=%d\naniso=%d\nsquare=%d\n", s_fxaa, s_aniso_lvl[s_aniso_idx], s_square);
+#endif
     if (s_scale_saved)
         fprintf(f, "scale=%d\n", s_scale_pct[s_scale_idx]);
     if (fclose(f))
