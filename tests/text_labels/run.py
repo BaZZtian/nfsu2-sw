@@ -26,7 +26,11 @@ static void fixture(unsigned char *buffer,int english) {
     unsigned used=0;for(unsigned i=0;i<4;i++){wr32(base+16+i*8,labels[i]);wr32(base+20+i*8,used);strcpy((char*)base+48+used,values[i]);used+=(unsigned)strlen(values[i])+1;}
 }
 static const char *text(unsigned char *buffer,unsigned index) {
-    unsigned char *base=buffer+8;return (const char*)base+rd32(base+12)+rd32(base+20+index*8);
+    const uint32_t labels[]={HASH_ENGLISH,0x8FE9288Eu,0x4AC50BCFu,0x12345678u};
+    unsigned char *base=buffer+8;
+    for(unsigned i=0;i<rd32(base+4);i++)if(rd32(base+16+i*8)==labels[index])
+        return (const char*)base+rd32(base+12)+rd32(base+20+i*8);
+    assert(0);return NULL;
 }
 int main(void) {
     unsigned char buffer[512],saved[512];char small[4];
@@ -34,6 +38,10 @@ int main(void) {
 #if defined(NFSU2_BUILD_EU)
     assert(!strcmp(text(buffer,1),"Reflexionen"));assert(!strcmp(text(buffer,2),"Aufl\xF6sung"));
     assert(strlen(text(buffer,2))==9 && (unsigned char)text(buffer,2)[4]==0xF6);
+    assert(rd32(buffer+12)==6);
+    for(unsigned i=1;i<6;i++)assert(rd32(buffer+24+(i-1)*8)<rd32(buffer+24+i*8));
+    unsigned char once[512];memcpy(once,buffer,sizeof once);
+    on_read(buffer,sizeof buffer,0);assert(!memcmp(once,buffer,sizeof once));
 #else
     assert(!strcmp(text(buffer,1),"Car Reflections"));assert(!strcmp(text(buffer,2),"Resolution Scale"));
 #endif
@@ -57,6 +65,15 @@ int main(void) {
     assert(!strcmp(label,"Texturfilter"));
     assert(rewrite(0xA9C27DFDu,"original",label,sizeof label,0)>0);
     assert(!strcmp(label,"Quadratische Pixel"));
+    char message[256];
+    assert(rewrite(NFSU2_VIDEO_RECOMMENDED_TITLE,"",message,sizeof message,0)>0);
+    assert(!strcmp(message,"Video: 1,5x empfohlen"));
+    assert(rewrite(NFSU2_VIDEO_WARNING_TITLE,"",message,sizeof message,0)>0);
+    assert(!strcmp(message,"Video: FPS-Einbruch m\xF6glich"));
+    assert(rewrite(NFSU2_VIDEO_RECOMMENDED_HELP,"",message,sizeof message,0)>0);
+    assert(strstr(message,"Reflexionen an")&&strstr(message,"Pixel aus"));
+    assert(rewrite(NFSU2_VIDEO_WARNING_HELP,"",message,sizeof message,1)>0);
+    assert(strstr(message,"FPS drops")&&strstr(message,"1.5x"));
 #else
     assert(!strcmp(label,"FPS Display"));
     assert(rewrite(0x4CD775ACu,"original",label,sizeof label,0)>0);
