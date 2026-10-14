@@ -1,6 +1,7 @@
 """Regenerate a region's translation using the shared upstream toolkit."""
 from pathlib import Path
 import argparse,hashlib,json,os,re,struct,subprocess,sys
+from eu_codegen_fixes import fix_audio_flags
 ROOT=Path(__file__).resolve().parents[1]
 EU_SHA='34e2a0dbc722302d12b05b12fbaf8d7c3ddd024183f3e33b96fff09156b29604'
 def detect(data):
@@ -125,7 +126,9 @@ def main():
       '--gen-dir',str(output),'--disasm-dir',str(analysis/'disasm'),'--func-id-dir',str(analysis/'func_id'),
       '--abi-dir',str(analysis/'abi'),'--exclude-manual',str(manual),'--mmio-sections','DSOUND,XPP']
     subprocess.run(params,cwd=toolkit,env=env,check=True)
-    if region=='EU':rewrite_eu(output)
+    if region=='EU':
+        rewrite_eu(output)
+        fix_audio_flags(output, data)
     # The combined manual source is for scanning, never a compiled game chunk.
     if region=='EU':manual.rename(output/'manual-scan.txt')
     manifest={'region':region,'xbe_sha256':hashlib.sha256(data).hexdigest(),'entry':f'0x{(0x21B77E if region=="EU" else 0x21B1CE):08X}'}
