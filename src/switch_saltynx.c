@@ -99,6 +99,10 @@ static Thread s_thread;
 static volatile bool s_stop;
 static bool s_thread_up;
 static int s_tries;
+static _Atomic int s_overlay_seen;          /* an overlay cleared pluginActive */
+static _Atomic uint32_t s_frames_reported;  /* presents written to the block */
+static _Atomic uint32_t s_probes;           /* overlay "alive?" checks seen */
+static int s_moves;                         /* block switches, for the log */
 
 static FpsBlock *find_block(uint8_t *page, size_t bytes)
 {
@@ -114,6 +118,25 @@ static FpsBlock *find_block(uint8_t *page, size_t bytes)
 static bool block_ok(const FpsBlock *b)
 {
     return b && b->magic == NXFPS_MAGIC;
+}
+
+/* Every NX-FPS magic in the page, for the log: the overlay reads the first. */
+static void log_page(const char *why)
+{
+    char line[160];
+    int n = 0, len;
+    if (!s_page)
+        return;
+    len = snprintf(line, sizeof line, "[saltynx] %s; FPS marks in the page at:", why);
+    for (size_t o = 0; o + 4 <= PAGE_BYTES && len < (int)sizeof line - 8; o += 4) {
+        uint32_t m;
+        memcpy(&m, s_page + o, 4);
+        if (m == NXFPS_MAGIC) {
+            len += snprintf(line + len, sizeof line - len, " +0x%X", (unsigned)o);
+            n++;
+        }
+    }
+    printf("%s%s\n", line, n ? "" : " none");
 }
 
 /* A new block: alive at once, ticks seeded so the overlay's average is a
@@ -247,7 +270,15 @@ static Result handshake(u64 *offset, bool *reserved)
         if (s_page && !find_block(s_page, PAGE_BYTES)) {
             u64 size = sizeof(FpsBlock);
             rc = serviceDispatchInOut(&srv, 6, size, *offset, .in_send_pid = true);
-            *reserved = R_SUCCEEDED(rc) && *offset + sizeof(FpsBlock) <= PAGE_BYTES;
+            /* SaltyNX's page starts with a 4-byte header it writes itself (the
+             * display refresh rate at +1; its clears start at +4), but its
+             * first reservation still answers offset 0: a block there loses
+             * its magic within a second. Take the next slot instead. */
+            if (R_SUCCEEDED(rc) && *offset < 4) {
+                printf("[saltynx] SaltyNX gave offset 0 (its header): reserving the next slot\n");
+                rc = serviceDispatchInOut(&srv, 6, size, *offset, .in_send_pid = true);
+            }
+            *reserved = R_SUCCEEDED(rc) && *offset >= 4 && *offset + sizeof(FpsBlock) <= PAGE_BYTES;
         }
         {
             u64 zero = 0;
@@ -302,10 +333,43 @@ static void salty_thread(void *arg)
     while (!s_stop) {
         FpsBlock *b = atomic_load(&s_block);
         if (!block_ok(b)) {
+            if (b && s_moves < 20)
+                log_page("our FPS block was wiped (SaltyNX clears the page when a process starts or ends)");
             atomic_store(&s_block, NULL);
             attach();
+            b = atomic_load(&s_block);
+            if (b && s_moves++ < 20)
+                log_page("after re-attaching");
         } else {
+            /* The overlay reads the first mark in the page. A block left
+             * before ours (a stale one, or Core's) would hide ours: use it. */
+            FpsBlock *first = find_block(s_page, PAGE_BYTES);
+            if (first && first != b) {
+                if (s_moves++ < 20)
+                    printf("[saltynx] another FPS block at +0x%X comes before ours at +0x%X: writing there\n",
+                           (unsigned)((uint8_t *)first - s_page), (unsigned)((uint8_t *)b - s_page));
+                seed(first);
+                atomic_store(&s_block, first);
+                b = first;
+            }
             b->fps = (uint8_t)atomic_load(&s_last_fps);
+        }
+        if (atomic_exchange(&s_overlay_seen, 0) == 1) {
+            static int told;
+            if (told++ < 3)
+                printf("[saltynx] an overlay is reading our block at +0x%X (it cleared pluginActive)\n",
+                       b ? (unsigned)((uint8_t *)b - s_page) : 0u);
+        }
+        {
+            static int secs, beats;
+            if (++secs % 30 == 0 && beats < 20) {
+                FpsBlock *cur = atomic_load(&s_block);
+                beats++;
+                printf("[saltynx] status: block at %s0x%X, %u frames written, %u overlay checks answered, fps %u\n",
+                       cur ? "+" : "none ", cur && s_page ? (unsigned)((uint8_t *)cur - s_page) : 0u,
+                       atomic_load(&s_frames_reported), atomic_load(&s_probes),
+                       atomic_load(&s_last_fps));
+            }
         }
         for (int i = 0; i < 10 && !s_stop; i++)
             svcSleepThread(100000000ull);   /* 1 s, quick to stop */
@@ -365,7 +429,13 @@ void nv2a_host_frame_presented(uint32_t width, uint32_t height)
         b->viewport_calls[0] = r;
     }
     b->api = API_VULKAN;
+    if (!b->plugin_active) {                /* the overlay's "are you alive?" */
+        atomic_store(&s_overlay_seen, 1);
+        atomic_fetch_add(&s_probes, 1);
+    }
     b->plugin_active = true;
+    if (atomic_fetch_add(&s_frames_reported, 1) == 0)
+        printf("[saltynx] first frame written to the FPS block (%ux%u)\n", width, height);
 }
 
 void switch_saltynx_start(void)
