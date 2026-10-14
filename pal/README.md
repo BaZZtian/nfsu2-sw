@@ -25,6 +25,12 @@ Its labels follow the game's selected language. German labels include
 font's single-byte encoding. This reads the retail language state and
 does not select a language or change the US wording.
 
+The added Video rows replace the fixed TV calibration panel; the original
+screen-size slider remains. EU picture defaults are FXAA off, texture filter
+off and square pixels off, with saved preferences taking precedence. In the
+EU build, turning the texture filter off also disables mip sampling; enabling
+it restores mipmaps. The existing US picture defaults remain unchanged.
+
 ## Performance baseline
 
 The default resolution scale is 1.5x in both builds. Higher resolutions
@@ -76,6 +82,12 @@ the same depth buffer keep matching physical dimensions. Texture-cache
 entries distinguish pitch, mip count and palette, including lower compressed
 mip levels in change detection.
 
+Render passes track color/depth dependencies per attachment and retain shader
+read visibility separately. Independent targets avoid a full memory barrier;
+uploads retain a conservative full dependency. New depth buffers initialize
+with an attachment clear before partial guest clears. `RECOMP_VK_SYNC=0` uses
+broad pass barriers and `RECOMP_VK_DEPTH_CLEAR=0` uses transfer initialization.
+
 Both regions share the flip-interval policy: frames can present on the next
 vblank, up to 60 FPS. `NFSU2_FPS_CAP=30` retains the game's original interval.
 
@@ -118,7 +130,8 @@ patcher in US and EU modes, including pool boundaries and malformed chunks.
 
 `tests/vulkan_textures/run.py` checks texture bytes on a Vulkan GPU, including
 pitch, mip-count and palette changes, lower-mip updates, shared garage depth
-and AA metadata transitions. It needs host Vulkan/glslang libraries;
+AA metadata transitions, and runtime mip changes for textures and reflection
+cubes. It needs host Vulkan/glslang libraries;
 `--help` lists their paths. `tests/frame_rate/run.py` checks the shared flip
 policy with the default and original 30 FPS cap.
 
