@@ -17,11 +17,13 @@ with tempfile.TemporaryDirectory(prefix='vulkan-textures-',dir=build) as folder:
  if args.baseline:variants.insert(0,('baseline',args.baseline.resolve()))
  for variant,source in variants:
   obj=work/(variant+'.o');exe=work/(variant+'.exe')
-  run(args.cc,'-O2','-DNV2A_SOURCE="'+source.as_posix()+'"','-I'+str(HERE),'-I'+args.vulkan_include,
+  run(args.cc,'-O2',*(['-DTEST_RUNTIME_MIPS'] if variant=='fixed' else []),'-DNV2A_SOURCE="'+source.as_posix()+'"','-I'+str(HERE),'-I'+args.vulkan_include,
    '-I'+args.glslang_include,'-I'+str(ROOT/'xboxrecomp/src/nv2a_vk'),'-c',HERE/'fixture.c','-o',obj)
   run(args.cxx,obj,*shader,args.vulkan_lib,args.glslang_lib,args.glslang_resources_lib,
    *(['-lwinpthread'] if os.name=='nt' else ['-lpthread']),'-o',exe)
-  for case in ['pitch','levels','mip-change','palette','depth','surface-aa']:
+  cases=['pitch','levels','mip-change','palette','depth','surface-aa']
+  if variant=='fixed':cases.append('runtime-mips')
+  for case in cases:
    r=subprocess.run([str(exe),case],env=env,capture_output=True,text=True,timeout=30)
    assert r.returncode==(7 if variant=='baseline' else 0),(variant,case,r.returncode,r.stdout,r.stderr)
    print(variant+': '+case+' PASS')
