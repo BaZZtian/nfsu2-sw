@@ -37,8 +37,12 @@ int SDL_ShowSimpleMessageBox(uint32_t flags, const char *title, const char *mess
                              void *window);
 #endif
 
+#ifndef NFSU2_PACKED_REGISTERS
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
+#endif
+#ifndef NFSU2_PACKED_REGISTERS
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+#endif
 extern ptrdiff_t g_xbox_mem_offset;
 extern volatile uint32_t g_icall_trace[16];
 extern volatile uint32_t g_icall_trace_idx;
@@ -424,14 +428,21 @@ static int game_main(void)
         nfsu2_nic_init();
     }
 
+    /* Picture options must be set before Vulkan creates its first surfaces. */
+    nfsu2_options_load();
+
 #ifndef _WIN32
     /* The GPU renderer (NFSU2_GL=0 falls back to the executor's CPU one). */
     {
         const char *gl = getenv("NFSU2_GL");
         if (!gl || strcmp(gl, "0") != 0) {
 #if defined(NFSU2_VULKAN)
-            extern void nv2a_vk_install(void);
-            nv2a_vk_install();
+            extern int nv2a_vk_initialize(void);
+            if (!nv2a_vk_initialize()) {
+                fatal("Vulkan initialization failed. See nfsu2x_log.txt. Startup stopped before the game.");
+                free(xbe_data);
+                return 1;
+            }
 #else
             extern void nv2a_gl_install(void);
             nv2a_gl_install();
@@ -442,7 +453,6 @@ static int game_main(void)
 
     xbox_kernel_init();
     nfsu2_text_patch_init();
-    nfsu2_options_load();
     xbox_path_init(game_dir, NFSU2_DEFAULT_SAVE_DIR);
     xbox_kernel_bridge_init();
 
