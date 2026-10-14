@@ -8,6 +8,7 @@
 #include <math.h>
 #define RECOMP_GENERATED_CODE
 #include "recomp_funcs.h"
+#include "../../video_recommendation.h"
 
 #ifdef __SWITCH__
 #define NFSU2_OPTIONS_FILE "sdmc:/switch/nfsu2x/nfsu2x_options.txt"
@@ -37,6 +38,7 @@ extern volatile int nv2a_vk_mips;
 #endif
 extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
 extern void sub_000CE7B0_gen(void);
+extern void sub_000DC4B0_gen(void);
 extern void sub_000B5110_gen(void);
 extern void sub_000B5170_gen(void);
 extern void sub_0009B680_gen(void);
@@ -48,6 +50,7 @@ static int s_fps;
 /* Keep the initial EU picture equivalent to the original renderer.
  * Picture options remain available and the user's saved choices win. */
 static int s_fxaa, s_aniso_idx, s_square;
+static uint32_t s_video_screen, s_video_title, s_video_rows[6];
 typedef struct {
     uint32_t label;
     const uint32_t *texts;
@@ -219,6 +222,45 @@ static void frame_restore(GuestFrame f, unsigned pop)
     RECOMP_ABI_CALL((va), fn); \
 } while (0)
 
+static void pause_caption(uint32_t screen, uint32_t name, uint32_t label, GuestFrame f);
+
+static int video_above_recommendation(void)
+{
+    return s_scale_pct[s_scale_idx] > 150 || s_fxaa || s_aniso_idx > 0 || s_square;
+}
+
+static void video_notice_update(GuestFrame f)
+{
+    if (!s_video_screen)
+        return;
+    int warning = video_above_recommendation();
+    MEM32(s_video_screen + 0x2Cu) = warning ? NFSU2_VIDEO_WARNING_HELP : NFSU2_VIDEO_RECOMMENDED_HELP;
+    PUSH32(g_esp, warning ? NFSU2_VIDEO_WARNING_TITLE : NFSU2_VIDEO_RECOMMENDED_TITLE);
+    PUSH32(g_esp, s_video_title);
+    PUSH32(g_esp, MEM32(s_video_screen + 4));
+    PUSH32(g_esp, 0x000E6AC7u);
+    EU_OPTION_CALL(0x001447F0u, sub_001447F0, f);
+    g_esp += 8;
+    PUSH32(g_esp, g_eax);
+    PUSH32(g_esp, 0x000E6AD0u);
+    EU_OPTION_CALL(0x00119020u, sub_00119020, f);
+    g_esp += 8;
+}
+
+static void video_notice_begin(uint32_t screen, int pause, GuestFrame f)
+{
+    s_video_screen = screen;
+    memset(s_video_rows, 0, sizeof s_video_rows);
+    s_video_title = 0x42ADB44Cu;
+    if (pause) {
+        PUSH32(g_esp, 0x00350CC8u);
+        PUSH32(g_esp, 0x000DAECCu);
+        EU_OPTION_CALL(0x00116500u, sub_00116500, f);
+        g_esp += 4;
+        s_video_title = g_eax;
+    }
+}
+
 /* The console Video page shows a fixed TV calibration panel below its
  * single original row. Extra rows occupy that same area. Hide only those
  * three decorative objects, through the engine's ordinary visibility API. */
@@ -246,11 +288,8 @@ static void video_calibration_hide(uint32_t screen, GuestFrame f)
     MEM8(screen + 0x150u) = 0;
 }
 
-void sub_000CE7B0(void)
+static int video_rows_add(uint32_t screen, GuestFrame f)
 {
-    uint32_t screen = g_ecx;
-    sub_000CE7B0_gen();
-    GuestFrame f = frame_save();
     int added = 0;
     for (int i = 0; i < N_ROWS; ++i) {
         OptRow *o = &s_rows[i];
@@ -281,6 +320,7 @@ void sub_000CE7B0(void)
         PUSH32(g_esp, 0x000CE93Du);
         EU_OPTION_CALL(0x0012B480u, sub_0012B480, f);
         MEM32(row) = o->vtable;
+        s_video_rows[i] = row;
         PUSH32(g_esp, 1);
         PUSH32(g_esp, row);
         g_ecx = screen;
@@ -288,9 +328,168 @@ void sub_000CE7B0(void)
         EU_OPTION_CALL(0x0015B8C0u, sub_0015B8C0, f);
         ++added;
     }
-    if (added)
+    return added;
+}
+
+void sub_000CE7B0(void)
+{
+    uint32_t screen = g_ecx;
+    sub_000CE7B0_gen();
+    GuestFrame f = frame_save();
+    video_notice_begin(screen, 0, f);
+    if (video_rows_add(screen, f)) {
         video_calibration_hide(screen, f);
+        video_notice_update(f);
+    }
     frame_restore(f, 0);
+}
+
+/* Pause Options uses its own package and return path. Add the retail Video
+ * category to that menu, then reuse the same row callbacks and saved values.
+ * Keep the pause screen's +0x150 pointer intact: it is not the main-menu TV
+ * calibration flag. */
+void sub_000DA850(void)
+{
+    uint32_t screen = g_ecx;
+    GuestFrame f = frame_save();
+    RECOMP_EU_ENTER(0x000DA850u); RECOMP_PREEMPT();
+    pause_caption(screen, 0x0034D46Cu, 0x1D7BB6C9u, f);
+    pause_caption(screen, 0x00350C6Cu, 0x933DD695u, f);
+    pause_caption(screen, 0x00350C5Cu, 0x8202C364u, f);
+    /* The same order as Options in the garage: Audio, Video, Controller,
+     * Gameplay. Reuse the retail item constructors and selection callbacks. */
+    static const struct { uint32_t title, label, vtable, select; } items[] = {
+        {0xE76CD783u, 0xF37AF144u, 0x0034F184u, 0x000B4550u},
+        {0xE8E24508u, 0x8A006328u, 0x0034F18Cu, 0x000B4570u},
+        {0xD0CF6EE1u, 0x4DF98FB2u, 0x0034F194u, 0x000B4590u},
+        {0xF760EABEu, 0xD708EFEFu, 0x0034F19Cu, 0x000B45B0u},
+    };
+    for (unsigned i = 0; i < sizeof items / sizeof items[0]; ++i) {
+        if (MEM32(items[i].vtable) != 0x0013DBE0u ||
+            MEM32(items[i].vtable + 4) != items[i].select) {
+            fprintf(stderr, "[options] EU pause category vtable differs\n");
+            continue;
+        }
+        PUSH32(g_esp, 0x48u);
+        PUSH32(g_esp, 0x000CE2EAu);
+        EU_OPTION_CALL(0x0017F940u, sub_0017F940, f);
+        g_esp += 4;
+        uint32_t item = g_eax;
+        if (!item) {
+            fprintf(stderr, "[options] pause category allocation failed\n");
+            continue;
+        }
+        PUSH32(g_esp, 0);
+        PUSH32(g_esp, items[i].title);
+        PUSH32(g_esp, items[i].label);
+        g_ecx = item;
+        PUSH32(g_esp, 0x000CE310u);
+        EU_OPTION_CALL(0x0012C5C0u, sub_0012C5C0, f);
+        MEM32(item) = items[i].vtable;
+        uint32_t before = g_esp;
+        PUSH32(g_esp, item);
+        g_ecx = screen;
+        g_ebp = f.bp; g_seh_ebp = f.seh;
+        PUSH32(g_esp, 0x000DA9A3u);
+        RECOMP_ICALL_SAFE_AT(MEM32(MEM32(screen) + 0x18u), before, 0x000DA9A0u);
+    }
+
+    PUSH32(g_esp, MEM32(screen + 4));
+    PUSH32(g_esp, 0x000DA9B2u);
+    EU_OPTION_CALL(0x00118560u, sub_00118560, f);
+    g_esp += 4;
+    uint32_t before = g_esp;
+    PUSH32(g_esp, g_eax);
+    g_ecx = screen + 0x50u;
+    g_ebp = f.bp; g_seh_ebp = f.seh;
+    PUSH32(g_esp, 0x000DA9BBu);
+    RECOMP_ICALL_SAFE_AT(MEM32(MEM32(screen + 0x50u) + 0x1Cu), before, 0x000DA9B8u);
+
+    before = g_esp;
+    g_ecx = screen;
+    g_ebp = f.bp; g_seh_ebp = f.seh;
+    PUSH32(g_esp, 0x000DA9C2u);
+    RECOMP_ICALL_SAFE_AT(MEM32(MEM32(screen) + 0x10u), before, 0x000DA9BFu);
+    frame_restore(f, 4);
+    fprintf(stderr, "[options] pause Video category added\n");
+}
+
+static void pause_caption(uint32_t screen, uint32_t name, uint32_t label, GuestFrame f)
+{
+    PUSH32(g_esp, label);
+    PUSH32(g_esp, name);
+    PUSH32(g_esp, 0x000DABB0u);
+    EU_OPTION_CALL(0x00116500u, sub_00116500, f);
+    PUSH32(g_esp, g_eax);
+    PUSH32(g_esp, MEM32(screen + 4));
+    PUSH32(g_esp, 0x000DABB7u);
+    EU_OPTION_CALL(0x001447F0u, sub_001447F0, f);
+    g_esp += 12;
+    PUSH32(g_esp, g_eax);
+    PUSH32(g_esp, 0x000DABC0u);
+    EU_OPTION_CALL(0x00119020u, sub_00119020, f);
+    g_esp += 8;
+}
+
+static int pause_screen_size_add(uint32_t screen, GuestFrame f)
+{
+    /* Reuse the original TV-size slider, without the main-menu calibration
+     * decorations or its +0x150 flag. Pause audio uses this same slider ABI. */
+    if (MEM32(0x0034F51Cu) != 0x000B4F00u ||
+        MEM32(0x0034F524u) != 0x000B4F40u) {
+        fprintf(stderr, "[options] EU screen-size row vtable differs\n");
+        return 0;
+    }
+    PUSH32(g_esp, 0x98u);
+    PUSH32(g_esp, 0x000CE81Eu);
+    EU_OPTION_CALL(0x0017F940u, sub_0017F940, f);
+    g_esp += 4;
+    uint32_t row = g_eax;
+    if (!row) {
+        fprintf(stderr, "[options] pause screen-size row allocation failed\n");
+        return 0;
+    }
+    PUSH32(g_esp, 1);
+    PUSH32(g_esp, screen + 0x120u);
+    PUSH32(g_esp, screen + 0x118u);
+    PUSH32(g_esp, screen + 0x110u);
+    PUSH32(g_esp, screen + 0x100u);
+    g_ecx = row;
+    PUSH32(g_esp, 0x000CE856u);
+    EU_OPTION_CALL(0x0012BAB0u, sub_0012BAB0, f);
+    MEM32(row) = 0x0034F518u;
+    PUSH32(g_esp, 1);
+    PUSH32(g_esp, row);
+    g_ecx = screen;
+    PUSH32(g_esp, 0x000CE871u);
+    EU_OPTION_CALL(0x0015BBD0u, sub_0015BBD0, f);
+    return 1;
+}
+
+void sub_000DC4B0(void)
+{
+    uint32_t screen = g_ecx;
+    sub_000DC4B0_gen();
+    if (MEM32(0x00407404u) != 1u)
+        return;
+    GuestFrame f = frame_save();
+    pause_caption(screen, 0x0034D46Cu, 0x1D7BB6C9u, f); /* Header_text */
+    pause_caption(screen, 0x00350CC8u, 0xE8E24508u, f); /* category title */
+    video_notice_begin(screen, 1, f);
+    int added = pause_screen_size_add(screen, f);
+    added += video_rows_add(screen, f);
+    if (added)
+        video_notice_update(f);
+    PUSH32(g_esp, MEM32(screen + 4));
+    PUSH32(g_esp, 0x000DC544u);
+    EU_OPTION_CALL(0x00118560u, sub_00118560, f);
+    g_esp += 4;
+    PUSH32(g_esp, g_eax);
+    g_ecx = screen;
+    PUSH32(g_esp, 0x000DC54Fu);
+    EU_OPTION_CALL(0x00146290u, sub_00146290, f);
+    frame_restore(f, 0);
+    fprintf(stderr, "[options] pause Video page: %d rows\n", added);
 }
 static void opt_row_text(uint32_t row, const OptRow *o, GuestFrame f)
 {
@@ -324,6 +523,8 @@ void sub_000B5110(void)
     if (msg == FE_PAD_LEFT || msg == FE_PAD_RIGHT) {
         *o->value = (*o->value + (msg == FE_PAD_RIGHT ? 1 : o->n - 1)) % o->n;
         o->changed();refl_views();options_save();
+        for (unsigned i = 0; i < sizeof s_video_rows / sizeof s_video_rows[0]; ++i)
+            if (s_video_rows[i] == row) { video_notice_update(f); break; }
         fprintf(stderr, "[options] car reflections %s, resolution scale %d%%\n",
                 s_refl ? "on" : "off", s_scale_pct[s_scale_idx]);
     }
