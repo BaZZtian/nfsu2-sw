@@ -297,6 +297,8 @@ typedef struct {
     uint32_t used;
     uint32_t aa_sx, aa_sy;
     int dirty;                 /* written since the last barrier */
+    int sampled;               /* read since a full barrier */
+    VkPipelineStageFlags read_visible;
     uint32_t gen;              /* bumped by every draw and clear into it */
 } VkSurf;
 
@@ -304,6 +306,8 @@ typedef struct {
     uint32_t va, pw, ph;
     VkImage image; VkImageView view; VkDeviceMemory mem;
     uint32_t used;
+    int needs_clear;
+    int dirty;
 } VkDepthBuf;
 
 #define VK_MAX_SURF 32
@@ -362,6 +366,8 @@ static uint32_t to_stored(uint32_t v, uint32_t p, uint32_t l)
 }
 static VkSurf     s_surf[VK_MAX_SURF];
 static VkDepthBuf s_depth[VK_MAX_DEPTH];
+static int s_transfer_pending;
+static uint32_t s_sync_full, s_sync_attachments, s_sync_independent, s_sync_reads;
 static VkSurf    *s_last;
 
 static int         s_in_render;
@@ -377,7 +383,58 @@ static void barrier_all(void)
     vkCmdPipelineBarrier(s_cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     for (i = 0; i < VK_MAX_SURF; i++)
-        s_surf[i].dirty = 0;
+        s_surf[i].dirty = s_surf[i].sampled = s_surf[i].read_visible = 0;
+    for (i = 0; i < VK_MAX_DEPTH; i++) s_depth[i].dirty = 0;
+    s_transfer_pending = 0;
+    ++s_sync_full;
+}
+
+static void attachment_dependencies(VkSurf *s, VkDepthBuf *d)
+{
+    static int optimize = -1;
+    if (optimize < 0) {
+        const char *e = getenv("RECOMP_VK_SYNC");
+        optimize = !(e && *e == '0');
+    }
+    if (!optimize || s_transfer_pending) { barrier_all(); return; }
+    VkImageMemoryBarrier b[2];
+    uint32_t n = 0;
+    VkPipelineStageFlags src = 0, dst = 0;
+    memset(b, 0, sizeof b);
+    if (s->dirty || s->sampled) {
+        b[n].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b[n].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                           | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        b[n].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        b[n].image = s->image;
+        b[n].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        src |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+             | VK_PIPELINE_STAGE_TRANSFER_BIT;
+        dst |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        /* Attachment visibility does not make writes visible to later shader reads. */
+        s->sampled = 0;
+        n++;
+    }
+    if (d && d->dirty) {
+        b[n].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b[n].srcAccessMask = b[n].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                                               | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        b[n].image = d->image;
+        b[n].subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        src |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dst |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        d->dirty = 0;
+        n++;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        b[i].oldLayout = b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b[i].srcQueueFamilyIndex = b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b[i].subresourceRange.levelCount = b[i].subresourceRange.layerCount = 1;
+    }
+    if (n) {
+        vkCmdPipelineBarrier(s_cb, src, dst, 0, 0, NULL, 0, NULL, n, b);
+        ++s_sync_attachments;
+    } else ++s_sync_independent;
 }
 
 static void end_rendering(void)
@@ -389,6 +446,56 @@ static void end_rendering(void)
 }
 
 static VkRect2D s_sc_cur;               /* scissor set in this pass */
+
+static int read_sync_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("RECOMP_VK_READ_SYNC");
+        enabled = !(e && *e == '0');
+        LOGE("targeted colour read dependencies %s\n", enabled ? "on" : "off");
+    }
+    return enabled;
+}
+
+static void surface_read_dependencies(VkSurf *const *surfaces, unsigned count,
+                                      const VkSurf *exclude, VkPipelineStageFlags stage)
+{
+    if (!read_sync_enabled()) {
+        /* Exact old shader-read path for comparison and rollback. Uploads
+         * are still ordered by attachment_dependencies when a pass starts. */
+        for (unsigned i = 0; i < count && i < 4; ++i)
+            if (surfaces[i] && surfaces[i] != exclude && surfaces[i]->dirty) {
+                end_rendering(); barrier_all(); break;
+            }
+        return;
+    }
+    if (s_transfer_pending) { end_rendering(); barrier_all(); return; }
+    VkImageMemoryBarrier b[4];
+    unsigned n = 0;
+    memset(b, 0, sizeof b);
+    for (unsigned i = 0; i < count && i < 4; ++i) {
+        VkSurf *s = surfaces[i];
+        if (!s || s == exclude || !s->dirty || (s->read_visible & stage)) continue;
+        b[n].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b[n].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        b[n].dstAccessMask = stage == VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                          ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_TRANSFER_READ_BIT;
+        b[n].oldLayout = b[n].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b[n].srcQueueFamilyIndex = b[n].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b[n].image = s->image;
+        b[n].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b[n].subresourceRange.levelCount = b[n].subresourceRange.layerCount = 1;
+        s->read_visible |= stage; /* Also deduplicates a target bound twice. */
+        ++n;
+    }
+    if (n) {
+        end_rendering();
+        vkCmdPipelineBarrier(s_cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, stage,
+                             0, 0, NULL, 0, NULL, n, b);
+        ++s_sync_reads;
+    }
+}
 
 static void set_viewport(uint32_t pw, uint32_t ph)
 {
@@ -433,7 +540,7 @@ static void begin_rendering(VkSurf *s, VkDepthBuf *d)
     if (s_in_render && s_rt == s && s_rt_depth == d)
         return;
     end_rendering();
-    barrier_all();
+    attachment_dependencies(s, d);
     ca.imageView = s->view;
     ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -450,7 +557,8 @@ static void begin_rendering(VkSurf *s, VkDepthBuf *d)
     if (d) {
         da.imageView = d->view;
         da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        da.loadOp = d->needs_clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        da.clearValue.depthStencil = (VkClearDepthStencilValue){ 1.0f, 0 };
         da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         ri.pDepthAttachment = &da;
         ri.pStencilAttachment = &da;
@@ -459,6 +567,7 @@ static void begin_rendering(VkSurf *s, VkDepthBuf *d)
     s_in_render = 1;
     s_rt = s;
     s_rt_depth = d;
+    if (d) { d->needs_clear = 0; d->dirty = 1; }
     set_viewport(s->pw, s->ph);
 }
 
@@ -562,6 +671,7 @@ static void clear_image_color(VkImage img, float r, float g, float b, float a)
                                    VK_REMAINING_ARRAY_LAYERS };
     end_rendering();
     vkCmdClearColorImage(s_cb, img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &rg);
+    s_transfer_pending = 1;
 }
 
 static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uint32_t aa_sy)
@@ -656,6 +766,7 @@ static void rescale_surfaces(double k)
         bl.dstOffsets[1].z = 1;
         vkCmdBlitImage(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, img,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        s_transfer_pending = 1;
         garbage_add(s->image, s->view, s->mem);
         s->image = img; s->view = view; s->mem = mem;
         s->pw = pw; s->ph = ph;
@@ -668,6 +779,17 @@ static void rescale_surfaces(double k)
         }
     if (copied)
         barrier_all();
+}
+
+static int depth_clear_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("RECOMP_VK_DEPTH_CLEAR");
+        enabled = !e || atoi(e) != 0;
+        LOGE("depth attachment initialisation=%d (fallback: RECOMP_VK_DEPTH_CLEAR=0)\n", enabled);
+    }
+    return enabled;
 }
 
 static VkDepthBuf *depth_get(uint32_t va, uint32_t pw, uint32_t ph)
@@ -691,17 +813,20 @@ static VkDepthBuf *depth_get(uint32_t va, uint32_t pw, uint32_t ph)
     memset(d, 0, sizeof *d);
     d->va = va; d->pw = pw; d->ph = ph; d->used = s_frame;
     if (!make_image(pw, ph, s_depth_fmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-                    VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                    (depth_clear_enabled() ? 0 : VK_IMAGE_USAGE_TRANSFER_DST_BIT),
                     VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
                     &d->image, &d->view, &d->mem)) {
         LOGE("depth 0x%08X %ux%u: image creation failed\n", va, pw, ph);
         memset(d, 0, sizeof *d);
         return NULL;
     }
-    {
+    if (depth_clear_enabled()) {
+        d->needs_clear = 1;
+    } else {
         VkClearDepthStencilValue z = { 1.0f, 0 };
         VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1 };
         vkCmdClearDepthStencilImage(s_cb, d->image, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
+        s_transfer_pending = 1;
     }
     if (s_trace)
         LOGE("depth 0x%08X %ux%u\n", va, pw, ph);
@@ -745,6 +870,8 @@ typedef struct {
  * anisotropic filtering of mipmapped textures, 1 = off (default 16, capped
  * by the device). RECOMP_VK_LOD_BIAS: their mip bias. */
 static int   s_mips = 1;
+volatile int nv2a_vk_mips = 1;
+static int mips_on(void) { return s_mips && nv2a_vk_mips; }
 static float s_aniso = 16.0f, s_lod_bias = -0.25f;
 
 #define VK_MAX_TEX 1024
@@ -752,6 +879,8 @@ static float s_aniso = 16.0f, s_lod_bias = -0.25f;
 static VkTex    s_tex[VK_MAX_TEX];
 static uint16_t s_tex_head[TEX_BUCKETS], s_tex_next[VK_MAX_TEX];
 static uint64_t s_tex_bytes;
+static uint32_t *s_decode;
+static size_t s_decode_cap;
 static uint32_t s_palette_reg, s_palette_va;
 static VkImage  s_dummy_img;
 static VkImageView s_dummy_view;
@@ -932,6 +1061,7 @@ static void tex_copy_from_ring(VkTex *t, VkDeviceSize at, uint32_t row_texels,
     rg.imageExtent.height = t->h >> level ? t->h >> level : 1;
     rg.imageExtent.depth = 1;
     vkCmdCopyBufferToImage(s_cb, s_f->ring, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+    s_transfer_pending = 1;
 }
 
 /* Copy `bytes` at `src` (row length `row_texels`, 0 = tight) into the image. */
@@ -976,6 +1106,7 @@ static void gen_mips(VkImage img, uint32_t w, uint32_t h, uint32_t levels, uint3
         bl.dstOffsets[1].z = 1;
         vkCmdBlitImage(s_cb, img, VK_IMAGE_LAYOUT_GENERAL, img,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        s_transfer_pending = 1;
     }
 }
 
@@ -1009,9 +1140,6 @@ static void tex_fill(VkTex *t, uint32_t va, uint32_t layer)
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
     uint32_t color = t->color, w = t->w, h = t->h, pitch = t->pitch, *px;
     Nv2aTexture nt;
-    VkDeviceSize at;
-    void *map;
-
     if (t->fmt != VK_FORMAT_B8G8R8A8_UNORM) {
         /* DXT as it is, with the title's mip levels (they follow level 0). */
         uint32_t l, lw = w, lh = h;
@@ -1029,11 +1157,14 @@ static void tex_fill(VkTex *t, uint32_t va, uint32_t layer)
         tex_upload(t, mem + va, pitch * (h - 1) + w * 4, pitch / 4, layer, 0);
         return;
     }
-    /* Everything else is decoded straight into the upload ring. */
-    at = ring_alloc(w * h * 4, 16, &map);
-    px = (uint32_t *)map;
-    if (!px)
-        return;
+    /* Decode independently of the mapped GPU upload ring. */
+    if ((size_t)w * h > s_decode_cap) {
+        uint32_t *grown = realloc(s_decode, (size_t)w * h * 4);
+        if (!grown) return;
+        s_decode = grown; s_decode_cap = (size_t)w * h;
+    }
+    px = s_decode;
+    if (!px) return;
     if (color == 0x06 || color == 0x07) {
         const uint32_t *src = (const uint32_t *)(mem + va);
         uint32_t x, y, fill = color == 0x07 ? 0xFF000000u : 0;
@@ -1059,7 +1190,7 @@ static void tex_fill(VkTex *t, uint32_t va, uint32_t layer)
                 LOGE("texture 0x%08X format 0x%02X not decodable\n", va, color);
         }
     }
-    tex_copy_from_ring(t, at, 0, layer, 0);
+    tex_upload(t, px, w * h * 4, 0, layer, 0);
 }
 
 /* face: bytes per cube face (cube_face_bytes), 0 for a 2D texture;
@@ -1178,7 +1309,8 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
             size = to_stored(w, faces[f]->pw, faces[f]->w);
     for (i = 0; i < VK_MAX_CUBE; i++)
         if (s_cube[i].image && s_cube[i].va == va && s_cube[i].w == w && s_cube[i].h == h
-            && s_cube[i].face == face && s_cube[i].size == size) {
+            && s_cube[i].face == face && s_cube[i].size == size
+            && s_cube[i].levels == (mips_on() ? full_levels(size, size) : 1)) {
             c = &s_cube[i];
             break;
         }
@@ -1191,7 +1323,7 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         memset(c, 0, sizeof *c);
         /* Mipmapped (sampled trilinear, bind_stage): a reflection on a
          * curved or distant body no longer sparkles. */
-        c->levels = s_mips ? full_levels(size, size) : 1;
+        c->levels = mips_on() ? full_levels(size, size) : 1;
         if (!make_image_ml(size, size, 6, c->levels, VK_FORMAT_B8G8R8A8_UNORM,
                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
@@ -1229,6 +1361,7 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         bl.dstOffsets[1].z = 1;
         vkCmdBlitImage(s_cb, sf->image, VK_IMAGE_LAYOUT_GENERAL, c->image,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        s_transfer_pending = 1;
         c->src[f] = sf;
         c->gen[f] = sf->gen;
     }
@@ -1346,7 +1479,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
         /* SET_TEXTURE_FORMAT [19:16]: mip levels, down to 1x1 at most. */
         most = full_levels(w, h);
         levels = (format >> 16) & 0xF;
-        if (!levels || !s_mips) levels = 1;
+        if (!levels || !mips_on()) levels = 1;
         if (levels > most) levels = most;
     } else {
         uint32_t rect = regs[base + 7];
@@ -1371,7 +1504,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
                 any |= (faces[f] = surf_find(va + f * face)) != NULL;
             if (any) {
                 out->imageView = cube_from_surfaces(va, w, h, face, faces);
-                levels = s_mips ? 2 : 1;            /* has a chain: see below */
+                levels = mips_on() ? 2 : 1;            /* has a chain: see below */
                 dyn_cube = 1;
             } else {
                 uint32_t texs = s_hz_texs;
@@ -2522,7 +2655,7 @@ static int ready(void)
             s_headless ? " (headless)" : "", s_have_bc ? "yes" : "no",
             s_depth_fmt == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8",
             s_have_depth_clamp ? "yes" : "no", (unsigned)s_ubo_align,
-            s_mips ? "yes" : "no", s_lod_bias, s_aniso, fxaa_on() ? "on" : "off");
+            mips_on() ? "yes" : "no", s_lod_bias, s_aniso, fxaa_on() ? "on" : "off");
     prewarm();
     present_start();
     return 1;
@@ -3234,11 +3367,7 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
     /* Textures first: uploads end the rendering pass. */
     for (i = 0; i < 4; i++)
         bind_stage(r, (int)i, tscale[i], &img[i], &sampled[i]);
-    for (i = 0; i < 4; i++)
-        if (sampled[i] && sampled[i]->dirty && sampled[i] != s) {
-            end_rendering();                 /* next begin_rendering barriers */
-            break;
-        }
+    surface_read_dependencies(sampled, 4, s, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
     memset(&key, 0, sizeof key);
     key.prog = (int)(p - s_prog);
@@ -3280,6 +3409,8 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
         }
     }
     begin_rendering(s, d);
+    for (i = 0; i < 4; ++i) if (sampled[i]) sampled[i]->sampled = 1;
+    s->read_visible = 0;
     s->dirty = 1;
     s->gen++;
     if (pipe != cur_pipe || cur_pipe_gen != s_cb_gen) {
@@ -3456,6 +3587,7 @@ static void vk_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
     begin_rendering(s, d);
     vkCmdClearAttachments(s_cb, nca, ca, 1, &rect);
     VT("  cleared\n");
+    s->read_visible = 0;
     s->dirty = 1;
     s->gen++;
 }
@@ -3509,6 +3641,7 @@ static void dump_surface(VkSurf *s, const char *path)
     rg.imageExtent.height = s->ph;
     rg.imageExtent.depth = 1;
     vkCmdCopyImageToBuffer(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, buf, 1, &rg);
+    s_transfer_pending = 1;
     flush_frame_wait();
     if (vkMapMemory(s_dev, mem, 0, bci.size, 0, &ptr) == VK_SUCCESS) {
         dump_bmp(path, (const uint8_t *)ptr, s->pw, s->ph);
@@ -3846,6 +3979,7 @@ static void fps_overlay_draw(VkImage dst, VkDeviceSize offset)
     copy.imageOffset = (VkOffset3D){8, 8, 0};
     copy.imageExtent = (VkExtent3D){FPS_OVERLAY_W, FPS_OVERLAY_H, 1};
     vkCmdCopyBufferToImage(s_cb, s_f->ring, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    s_transfer_pending = 1;
     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     b.dstAccessMask = 0;
     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -3930,6 +4064,10 @@ static void vk_flip(void)
                 if (s)
                     fprintf(stderr, "[vk-size] guest %ux%u, AA %ux%u, stored %ux%u\n",
                             s->w, s->h, s->aa_sx, s->aa_sy, s->pw, s->ph);
+                fprintf(stderr, "[vk-sync] full %u, attachment %u, independent %u, reads %u; mips %s\n",
+                        s_sync_full, s_sync_attachments, s_sync_independent, s_sync_reads,
+                        mips_on() ? "on" : "off");
+                s_sync_full = s_sync_attachments = s_sync_independent = s_sync_reads = 0;
                 last_frame = s_frame;
                 last = now;
             }
@@ -4022,6 +4160,7 @@ static void vk_flip(void)
             vkCmdPipelineBarrier(s_cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  0, 0, NULL, 0, NULL, 1, &b);
             vkCmdClearColorImage(s_cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rg);
+            s_transfer_pending = 1;
             if (dw > 0 && dh > 0) {
                 VkImageBlit bl;
                 VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
@@ -4043,6 +4182,7 @@ static void vk_flip(void)
                 bl.dstOffsets[1].z = 1;
                 vkCmdBlitImage(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, dst,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
+                s_transfer_pending = 1;
             }
             b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             b.dstAccessMask = 0;
