@@ -51,6 +51,20 @@ endif()
 
 # The Vulkan renderer (xboxrecomp nv2a_vk) instead of OpenGL. On the Switch it
 # links mesa-switch's static NVK (NVK_SDK) and builds nfsu2x-vulkan.nro.
+option(NFSU2_PACKED_REGISTERS "Use compatible generated scalar TLS storage" OFF)
+if(NFSU2_PACKED_REGISTERS)
+    if(NOT EXISTS "${NFSU2_GEN_DIR}/recomp_registers.h")
+        message(FATAL_ERROR "Packed storage requires a matching generated register header")
+    endif()
+    file(READ "${NFSU2_GEN_DIR}/recomp_registers.h" generated_register_header)
+    file(READ "${XBOXRECOMP_DIR}/src/kernel/recomp_registers.h" runtime_register_header)
+    string(REPLACE "\r\n" "\n" generated_register_header "${generated_register_header}")
+    string(REPLACE "\r\n" "\n" runtime_register_header "${runtime_register_header}")
+    if(NOT generated_register_header STREQUAL runtime_register_header)
+        message(FATAL_ERROR "Generated and runtime packed-register headers differ; keep this option OFF")
+    endif()
+    add_compile_definitions(NFSU2_PACKED_REGISTERS=1)
+endif()
 option(NFSU2_VULKAN "Render with Vulkan instead of OpenGL" OFF)
 set(XBOXRECOMP_VULKAN ${NFSU2_VULKAN} CACHE BOOL "" FORCE)
 
@@ -61,8 +75,11 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "${NFSU2_GEN_DIR}/*.c")
 set(GAME_SOURCES
     src/main.c
     src/game_region.c
+    src/frame_rate.c
     src/switch_nx.c
     src/switch_heap.c
+    src/switch_saltynx.c
+    src/switch_diagnostics.c
     src/text_patch.c
     src/movie_crop.c
 src/nic.c
@@ -197,7 +214,7 @@ if(NINTENDO_SWITCH)
     # The release lives here, not in the cache: a cached default stays at
     # whatever the build directory was first configured with (the 0.4.5 NRO
     # said 0.4.3). -DNFSU2_SWITCH_VERSION_OVERRIDE=x sets another one.
-    set(NFSU2_SWITCH_VERSION "0.5.7")
+    set(NFSU2_SWITCH_VERSION "0.5.9")
     if(NFSU2_SWITCH_VERSION_OVERRIDE)
         set(NFSU2_SWITCH_VERSION "${NFSU2_SWITCH_VERSION_OVERRIDE}")
     endif()
@@ -217,6 +234,10 @@ if(NINTENDO_SWITCH)
     target_link_options(${PROJECT_NAME} PRIVATE
         "LINKER:--wrap=SDL_SYS_SetThreadPriority"
         "LINKER:--wrap=audrvVoiceAddWaveBuf")
+    target_link_options(${PROJECT_NAME} PRIVATE
+        "LINKER:--wrap=abort" "LINKER:--wrap=exit"
+        "LINKER:--wrap=_exit" "LINKER:--wrap=__libnx_exit"
+        "LINKER:--wrap=fatalThrow")
     set_property(SOURCE src/switch_nx.c APPEND PROPERTY
         INCLUDE_DIRECTORIES "${XBOXRECOMP_DIR}/src/apu")
     # switch_nx.c's loading screen asks EGL for the on-screen size.
