@@ -185,8 +185,10 @@ void sub_002F23A0(void)
 {
     RECOMP_EU_ENTER(0x002F23A0u);
     uint32_t blk = ecx;
-    uint32_t head = MEM32(blk + 0x1BC);
     uint8_t old = d3d_isr_enter();
+    /* Raising IRQL releases the guest lock. Count only our own retirements
+     * after reacquiring it, as in the shared US handler. */
+    uint32_t head = MEM32(blk + 0x1BC);
 
     xbox_Nv2aVblankTaken();
     sub_002F23A0_gen();
@@ -210,18 +212,22 @@ extern void sub_002F2910_gen(void);
 extern void nv2a_pb_trap_lock(void);
 extern void nv2a_pb_trap_unlock(void);
 extern void nv2a_pb_trap_taken(void);
+#include "frame_rate.h"
 
 void sub_002F2910(void)
 {
     RECOMP_EU_ENTER(0x002F2910u);
     volatile uint32_t *nv = (volatile uint32_t *)XBOX_PTR(0xFD000000u);
     uint32_t blk = ecx;
-    uint32_t head = MEM32(blk + 0x1BC);
     uint8_t old = d3d_isr_enter();
+    uint32_t head = MEM32(blk + 0x1BC);     /* protected at DISPATCH */
     uint32_t nsource;
 
     nv2a_pb_trap_lock();
     nsource = nv[0x400108 / 4];
+    uint32_t data = nv[0x400708 / 4];
+    uint32_t flip = nfsu2_flip_trap_data(nsource, nv[0x400704 / 4], data);
+    if (flip != data) nv[0x400708 / 4] = flip;
     sub_002F2910_gen();
     nv2a_pb_flip_retired(MEM32(blk + 0x1BC) - head);   /* a flip queued on its vblank retires at once */
     if (nsource)
