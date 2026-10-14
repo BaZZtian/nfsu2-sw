@@ -1298,19 +1298,21 @@ typedef struct {
 static VkCube s_cube[VK_MAX_CUBE];
 
 static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint32_t face,
-                                      VkSurf *faces[6])
+                                      VkSurf *faces[6], uint32_t max_levels)
 {
     VkCube *c = NULL;
-    uint32_t f, size = 0;
+    uint32_t f, size = 0, levels;
     int i, copied = 0;
 
     for (f = 0; f < 6; f++)
         if (faces[f] && to_stored(w, faces[f]->pw, faces[f]->w) > size)
             size = to_stored(w, faces[f]->pw, faces[f]->w);
+    levels = mips_on() ? full_levels(size, size) : 1;
+    if (levels > max_levels) levels = max_levels;
     for (i = 0; i < VK_MAX_CUBE; i++)
         if (s_cube[i].image && s_cube[i].va == va && s_cube[i].w == w && s_cube[i].h == h
             && s_cube[i].face == face && s_cube[i].size == size
-            && s_cube[i].levels == (mips_on() ? full_levels(size, size) : 1)) {
+            && s_cube[i].levels == levels) {
             c = &s_cube[i];
             break;
         }
@@ -1323,7 +1325,7 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         memset(c, 0, sizeof *c);
         /* Mipmapped (sampled trilinear, bind_stage): a reflection on a
          * curved or distant body no longer sparkles. */
-        c->levels = mips_on() ? full_levels(size, size) : 1;
+        c->levels = levels;
         if (!make_image_ml(size, size, 6, c->levels, VK_FORMAT_B8G8R8A8_UNORM,
                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
@@ -1373,7 +1375,8 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
     return c->view;
 }
 
-/* Samplers: wrap u, wrap v, mag, min, mipmapped. */
+/* Samplers: wrap u/v, mag/min, mipmapped, anisotropy and clamped min/max LOD.
+ * LOD occupies the unused nibbles at 4 and 12; images have at most 13 levels. */
 typedef struct { uint32_t key; VkSampler s; } SamplerEnt;
 static SamplerEnt s_samplers[512];
 static int s_nsamplers;
@@ -1406,7 +1409,8 @@ static VkSampler sampler_get(uint32_t key)
     if (key & 0x40000) {
         /* The title's mipmapped filters, always trilinear (GPU time only). */
         ci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        ci.maxLod = VK_LOD_CLAMP_NONE;
+        ci.minLod = (float)((key >> 4) & 0xF);
+        ci.maxLod = (float)((key >> 12) & 0xF);
         ci.mipLodBias = s_lod_bias;
         if (key >> 20) {
             ci.anisotropyEnable = VK_TRUE;
@@ -1461,6 +1465,8 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
     uint32_t format = regs[base + 1];
     uint32_t color = (format >> 8) & 0xFF;
     uint32_t va, w, h, pitch = 0, addr, filter, key, levels = 1, minf;
+    uint32_t min_lod = (control0 >> 18) & 0x3FF;
+    uint32_t max_lod = (control0 >> 6) & 0x3FF;
     int dyn_cube = 0;
     VkSurf *rt;
 
@@ -1481,6 +1487,9 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
         levels = (format >> 16) & 0xF;
         if (!levels || !mips_on()) levels = 1;
         if (levels > most) levels = most;
+        /* CONTROL0 may pin a mipmapped atlas to level zero. Uploading and
+         * sampling smaller levels anyway introduces neighbouring glyphs. */
+        if (levels > max_lod + 1) levels = max_lod + 1;
     } else {
         uint32_t rect = regs[base + 7];
         w = rect >> 16;
@@ -1503,8 +1512,13 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
             for (f = 0; f < 6; f++)
                 any |= (faces[f] = surf_find(va + f * face)) != NULL;
             if (any) {
-                out->imageView = cube_from_surfaces(va, w, h, face, faces);
-                levels = mips_on() ? 2 : 1;            /* has a chain: see below */
+                out->imageView = cube_from_surfaces(va, w, h, face, faces, max_lod + 1);
+                levels = 1;
+                for (unsigned c = 0; c < VK_MAX_CUBE; ++c)
+                    if (s_cube[c].view == out->imageView) {
+                        levels = s_cube[c].levels;
+                        break;
+                    }
                 dyn_cube = 1;
             } else {
                 uint32_t texs = s_hz_texs;
@@ -1534,7 +1548,10 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
     /* MIN 3..6: the *_MIPMAP_* filters. */
     if (levels > 1 && ((minf >= 3 && minf <= 6) || (dyn_cube && minf != 1))) {
         int an = nv2a_vk_aniso;
+        if (max_lod >= levels) max_lod = levels - 1;
+        if (min_lod > max_lod) min_lod = max_lod;
         key |= 0x40000;
+        key |= (min_lod << 4) | (max_lod << 12);
         if (an > (int)s_aniso) an = (int)s_aniso;
         if (an > 1 && !(key & 0x30000))
             key |= (uint32_t)an << 20;          /* bits 20..24: anisotropy */
