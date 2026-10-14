@@ -36,6 +36,7 @@ static const struct { uint32_t hash; const char *text; } s_always[] = {
     /* Options -> Video rows */
     { 0x8FE9288Eu, "Car Reflections" },          /* "Car Reflection Detail" */
     { 0x4AC50BCFu, "Resolution Scale" },         /* "Car Geometry Detail" */
+    { 0xA9A76BBAu, "FPS Display" },              /* PC-only "Resolution" */
     { 0x2A2A4AB3u, "1x" },                       /* "Road Reflection Detail" */
     { 0x822E4E9Bu, "1.5x" },                     /* "Motion Blur" */
     { 0xB55E7665u, "2x" },                       /* "Level Of Detail" */
@@ -61,6 +62,9 @@ static const struct { uint32_t hash; const char *text; } s_always[] = {
 };
 
 static int s_switch_words;
+#if defined(NFSU2_BUILD_EU)
+extern int nfsu2_text_language_is_german(void);
+#endif
 
 /* Whole strings, by label hash. */
 static const struct { uint32_t hash; const char *text; } s_by_hash[] = {
@@ -108,6 +112,17 @@ static const struct { const char *from, *to; } s_rules[] = {
 static int rewrite(uint32_t hash, const char *src, char *dst, size_t cap, int english)
 {
     size_t n = 0, i;
+#if defined(NFSU2_BUILD_EU)
+    if (!english && nfsu2_text_language_is_german()) {
+        if (hash == 0x8FE9288Eu) { src = "Reflexionen"; goto copy; }
+        /* The retail font uses a single byte, not UTF-8, for umlauts. */
+        if (hash == 0x4AC50BCFu) { src = "Aufl\xF6sung"; goto copy; }
+        if (hash == 0xA9A76BBAu) { src = "FPS-Anzeige"; goto copy; }
+        if (hash == 0x4CD775ACu) { src = "Kantengl\xE4ttung"; goto copy; }
+        if (hash == 0x4E57D355u) { src = "Texturfilter"; goto copy; }
+        if (hash == 0xA9C27DFDu) { src = "Quadratische Pixel"; goto copy; }
+    }
+#endif
     for (i = 0; i < sizeof s_always / sizeof s_always[0]; i++)
         if (s_always[i].hash == hash) { src = s_always[i].text; goto copy; }
     if (!s_switch_words || !english)
