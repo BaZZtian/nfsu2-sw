@@ -403,6 +403,16 @@ void sub_002F1D80(void)
  * it (nv2a_pb_exec.c). */
 extern void sub_002F22F0_gen(void);
 extern void nv2a_pb_trap_lock(void);
+/* The frame-rate cap. Present (sub_002EB4B0/sub_002EB6A0) turns D3D's
+ * presentation interval (0x2F76FC: 1, 2, 4 vblanks, bit 31 = flip at once
+ * when late) into a NOP trap word, (bits << 5) | 1 -- bits 0..2 = 1/2/3
+ * for 1/2/4 vblanks, bit 3 = immediate -- and the flip queue (sub_002F2080,
+ * case 1) schedules the flip that many vblanks after the last one. NFSU2
+ * asks for 2 in races and the open world: 30 fps at most. The wrapper
+ * rewrites the interval to 1 as the trap is taken, so a frame ready in time
+ * shows on the next vblank (60 fps at most); slower frames are unchanged.
+ * NFSU2_FPS_CAP=30 keeps the title's interval. */
+#include "frame_rate.h"
 extern void nv2a_pb_trap_unlock(void);
 extern void nv2a_pb_trap_taken(void);
 
@@ -416,6 +426,9 @@ void sub_002F22F0(void)
 
     nv2a_pb_trap_lock();
     nsource = nv[0x400108 / 4];
+    uint32_t data = nv[0x400708 / 4];
+    uint32_t flip = nfsu2_flip_trap_data(nsource, nv[0x400704 / 4], data);
+    if (flip != data) nv[0x400708 / 4] = flip;
     sub_002F22F0_gen();
     nv2a_pb_flip_retired(MEM32(blk + 0x1BC) - head);   /* a flip queued on its vblank retires at once */
     if (nsource)
@@ -1603,6 +1616,7 @@ extern volatile int nv2a_vk_scale_pct;
 extern volatile int nv2a_vk_fxaa;
 extern volatile int nv2a_vk_aniso;
 extern volatile int nv2a_vk_square;
+extern volatile int nv2a_vk_fps_overlay;
 #endif
 extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
 extern volatile int usb_gamepad_rumble_pct;
@@ -1633,6 +1647,7 @@ static int s_scale_saved;               /* nfsu2x_options.txt had scale= */
 static int s_fxaa = 1;                  /* 0 off, 1 on */
 static int s_aniso_idx = 4;             /* into s_aniso_lvl: 16x */
 static int s_square = 1;                /* 0 off, 1 on */
+static int s_fps;                       /* default from NFSU2_FPS_OVERLAY */
 static int s_vib_idx = 10;              /* vibration in 10% steps: 100% */
 
 typedef struct {
@@ -1670,6 +1685,10 @@ static void picture_changed(void)
     nv2a_vk_aniso = s_aniso_lvl[s_aniso_idx];
     nv2a_vk_square = s_square;
 }
+static void fps_changed(void)
+{
+    nv2a_vk_fps_overlay = s_fps;
+}
 #endif
 
 static const uint32_t s_refl_texts[] = { 0x0000CCFAu, 0x0000063Cu };    /* Off, On */
@@ -1688,6 +1707,7 @@ static OptRow s_rows[] = {
     { 0x8FE9288Eu, s_refl_texts, 2, &s_refl, refl_changed, 0, 0 },     /* Car Reflections */
 #ifdef NFSU2_VULKAN
     { 0x4AC50BCFu, s_scale_texts, 4, &s_scale_idx, scale_changed, 0, 0 }, /* Resolution Scale */
+    { 0xA9A76BBAu, s_refl_texts, 2, &s_fps, fps_changed, 0, 0 },     /* FPS Display */
     { 0x4CD775ACu, s_refl_texts, 2, &s_fxaa, picture_changed, 0, 0 },  /* Anti-Aliasing */
     { 0x4E57D355u, s_aniso_texts, 5, &s_aniso_idx, picture_changed, 0, 0 }, /* Anisotropic */
     { 0xA9C27DFDu, s_refl_texts, 2, &s_square, picture_changed, 0, 0 }, /* Square Pixels */
@@ -1715,6 +1735,8 @@ void nfsu2_options_load(void)
     char line[128];
     FILE *f = fopen(NFSU2_OPTIONS_FILE, "r");
     int i;
+    const char *fps_env = getenv("NFSU2_FPS_OVERLAY");
+    s_fps = fps_env && !strcmp(fps_env, "1");
 
     if (f) {
         while (fgets(line, sizeof line, f)) {
@@ -1728,6 +1750,14 @@ void nfsu2_options_load(void)
                 }
             if (!strncmp(line, "reflections=", 12))
                 s_refl = line[12] != '0';
+            else if (!strncmp(line, "fps_display=", 12)) {
+                char *end;
+                long v = strtol(line + 12, &end, 10);
+                if (end != line + 12) {
+                    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') ++end;
+                    if (!*end && (v == 0 || v == 1)) s_fps = (int)v;
+                }
+            }
             else if (!strncmp(line, "fxaa=", 5))
                 s_fxaa = line[5] != '0';
             else if (!strncmp(line, "vibration=", 10)) {
@@ -1771,6 +1801,7 @@ void nfsu2_options_load(void)
         }
     }
     picture_changed();
+    fps_changed();
 #endif
     options_log();
 }
@@ -1788,6 +1819,7 @@ static void options_save(void)
         fprintf(f, "scale=%d\n", s_scale_pct[s_scale_idx]);
 #ifdef NFSU2_VULKAN
     fprintf(f, "fxaa=%d\naniso=%d\nsquare=%d\n", s_fxaa, s_aniso_lvl[s_aniso_idx], s_square);
+    fprintf(f, "fps_display=%d\n", s_fps);
 #endif
     for (i = 0; i < N_VOLS; i++)
         if (s_vol_have[i])
