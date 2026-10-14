@@ -62,6 +62,35 @@ int main(int argc,char **argv){
   VkSurf *a=surf_get(0x60000,1280,480,2,1);CHECK(a);VkImage original=a->image;
   clear_image_color(a->image,1,0,0,1);VkSurf *b=surf_get(0x60000,1280,480,1,1);
   CHECK(b->image==original);uint32_t pixel;read_image(b->image,1,1,0,&pixel,4);CHECK(pixel==0xffff0000);
+ }else if(!strcmp(which,"runtime-mips")){
+#ifdef TEST_RUNTIME_MIPS
+  uint32_t r[2048]={0};Nv2aRawBatch batch={0};float scale[2];
+  VkDescriptorImageInfo desc;VkSurf *sampled;
+  batch.tex_va[0]=0x20000;s_batch=&batch;s_mips=1;
+  memset(guest_memory+0x20000,0x55,16);
+  r[0x1b00/4]=0x20000;r[0x1b04/4]=(0x0c<<8)|(2<<16)|(2<<20)|(2<<24);
+  r[0x1b0c/4]=0x40000000;
+  nv2a_vk_mips=0;bind_stage(r,0,scale,&desc,&sampled);
+  CHECK(by_view(desc.imageView)->levels==1);
+  nv2a_vk_mips=1;bind_stage(r,0,scale,&desc,&sampled);
+  CHECK(by_view(desc.imageView)->levels==2);
+  unsigned char bytes[8];read_image(by_view(desc.imageView)->image,2,2,1,bytes,8);
+  CHECK(!memcmp(bytes,guest_memory+0x20008,8));
+  nv2a_vk_mips=0;bind_stage(r,0,scale,&desc,&sampled);
+  CHECK(by_view(desc.imageView)->levels==1);
+  VkSurf *faces[6]={surf_get(0x60000,4,4,1,1)};
+  clear_image_color(faces[0]->image,1,0,0,1);
+  for(unsigned mode=0;mode<3;mode++){
+   nv2a_vk_mips=mode==1;
+   VkImageView view=cube_from_surfaces(0x60000,4,4,64,faces);
+   VkCube *cube=NULL;for(unsigned i=0;i<VK_MAX_CUBE;i++)if(s_cube[i].view==view)cube=&s_cube[i];
+   CHECK(cube && cube->levels==(mode==1?3:1));
+   uint32_t pixel;read_image(cube->image,1,1,mode==1?2:0,&pixel,4);
+   CHECK(pixel==0xffff0000);
+  }
+#else
+  return 8;
+#endif
  }else return 8;
  puts("PASS: actual GPU texture bytes");return 0;
 }
