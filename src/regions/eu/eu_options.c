@@ -33,6 +33,7 @@ extern volatile int nv2a_vk_fps_overlay;
 extern volatile int nv2a_vk_fxaa;
 extern volatile int nv2a_vk_aniso;
 extern volatile int nv2a_vk_square;
+extern volatile int nv2a_vk_mips;
 #endif
 extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
 extern void sub_000CE7B0_gen(void);
@@ -44,7 +45,9 @@ static const int s_scale_pct[] = {100, 150, 200, 250};
 static const int s_aniso_lvl[] = {1, 2, 4, 8, 16};
 static int s_refl = 1, s_scale_idx = 1, s_scale_saved;
 static int s_fps;
-static int s_fxaa = 1, s_aniso_idx = 4, s_square = 1;
+/* Keep the initial EU picture equivalent to the original renderer.
+ * Picture options remain available and the user's saved choices win. */
+static int s_fxaa, s_aniso_idx, s_square;
 typedef struct {
     uint32_t label;
     const uint32_t *texts;
@@ -74,6 +77,7 @@ static void picture_changed(void)
     nv2a_vk_fxaa = s_fxaa;
     nv2a_vk_aniso = s_aniso_lvl[s_aniso_idx];
     nv2a_vk_square = s_square;
+    nv2a_vk_mips = s_aniso_idx != 0;
 }
 #endif
 static const uint32_t s_refl_texts[] = {0x0000CCFAu, 0x0000063Cu};
@@ -215,11 +219,39 @@ static void frame_restore(GuestFrame f, unsigned pop)
     RECOMP_ABI_CALL((va), fn); \
 } while (0)
 
+/* The console Video page shows a fixed TV calibration panel below its
+ * single original row. Extra rows occupy that same area. Hide only those
+ * three decorative objects, through the engine's ordinary visibility API. */
+static void video_calibration_hide(uint32_t screen, GuestFrame f)
+{
+    static const uint32_t objects[] = {
+        0xE54C30BEu, /* ColorCal_Logo */
+        0x8E1BEA84u, /* ColorCal_Blurb */
+        0x608BB8C8u, /* Colour_Calibration_Backing */
+    };
+    uint32_t package = MEM32(screen + 4);
+    if (!package)
+        return;
+    for (unsigned i = 0; i < sizeof objects / sizeof objects[0]; ++i) {
+        PUSH32(g_esp, objects[i]);
+        PUSH32(g_esp, package);
+        PUSH32(g_esp, 0x000CE7F2u);
+        EU_OPTION_CALL(0x001447A0u, sub_001447A0, f);
+        g_esp += 8;
+        PUSH32(g_esp, g_eax);
+        PUSH32(g_esp, 0x000CE7F8u);
+        EU_OPTION_CALL(0x00119110u, sub_00119110, f);
+        g_esp += 4;
+    }
+    MEM8(screen + 0x150u) = 0;
+}
+
 void sub_000CE7B0(void)
 {
     uint32_t screen = g_ecx;
     sub_000CE7B0_gen();
     GuestFrame f = frame_save();
+    int added = 0;
     for (int i = 0; i < N_ROWS; ++i) {
         OptRow *o = &s_rows[i];
         if (!o->vtable) {
@@ -254,7 +286,10 @@ void sub_000CE7B0(void)
         g_ecx = screen;
         PUSH32(g_esp, 0x000CE957u);
         EU_OPTION_CALL(0x0015B8C0u, sub_0015B8C0, f);
+        ++added;
     }
+    if (added)
+        video_calibration_hide(screen, f);
     frame_restore(f, 0);
 }
 static void opt_row_text(uint32_t row, const OptRow *o, GuestFrame f)
