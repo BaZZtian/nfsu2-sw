@@ -291,8 +291,13 @@ typedef struct {
  * Horizontal: s_scale times s_xratio, 1 unless RECOMP_GL_SCALE_X sets the
  * horizontal scale outright (a game option's rescale keeps the ratio).
  * s_square: widescreen shows the title's 640x480 at 16:9, so surfaces
- * without horizontal AA get 4/3 more columns -- square pixels (races: 1.5x
+ * narrower than 1280 get 4/3 more columns -- square pixels (races: 1.5x
  * -> 1280x720). The front end's 1280x480 (aa 2x1) is wide enough already.
+ * Decided by the width alone, never the AA mode: surfaces that share a zeta
+ * buffer must get the same stored size, or depth_get hands the second one a
+ * fresh, empty depth buffer. The garage draws the car into the 1280x480 aa
+ * 2x1 back buffer and the neon into a 1280-wide target without AA on the
+ * same Z; widened by AA mode, the neon showed through the car (issue #32).
  * RECOMP_VK_SQUARE=0 off; RECOMP_GL_SCALE_X overrides it. */
 static double   s_scale = 1.0, s_scale_x = 1.0, s_xratio = 1.0;
 static int      s_square, s_square_env;
@@ -314,9 +319,9 @@ volatile int nv2a_vk_scale_pct;
 
 /* The stored size of a w x h surface at the current scale, capped per axis
  * by the device's image limits. */
-static void stored_size(uint32_t w, uint32_t h, uint32_t aa_sx, uint32_t *pw, uint32_t *ph)
+static void stored_size(uint32_t w, uint32_t h, uint32_t *pw, uint32_t *ph)
 {
-    double kx = s_scale_x * (s_square && aa_sx <= 1 ? 4.0 / 3.0 : 1.0), ky = s_scale;
+    double kx = s_scale_x * (s_square && w < 1280 ? 4.0 / 3.0 : 1.0), ky = s_scale;
     if (w * kx > (double)s_max_size)
         kx = (double)s_max_size / w;
     if (h * ky > (double)s_max_size)
@@ -564,7 +569,7 @@ static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uin
     memset(s, 0, sizeof *s);
     s->va = va; s->w = w; s->h = h; s->used = s_frame;
     s->aa_sx = aa_sx; s->aa_sy = aa_sy;
-    stored_size(w, h, aa_sx, &s->pw, &s->ph);
+    stored_size(w, h, &s->pw, &s->ph);
     if (!make_image(s->pw, s->ph, VK_FORMAT_B8G8R8A8_UNORM,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -600,7 +605,7 @@ static void rescale_surfaces(double k)
         uint32_t pw, ph;
         if (!s->image)
             continue;
-        stored_size(s->w, s->h, s->aa_sx, &pw, &ph);
+        stored_size(s->w, s->h, &pw, &ph);
         if (pw == s->pw && ph == s->ph)
             continue;
         if (!make_image(pw, ph, VK_FORMAT_B8G8R8A8_UNORM,
@@ -2248,6 +2253,11 @@ static int ready(void)
         const char *e = getenv("RECOMP_GL_SCALE");
         double k = e ? strtod(e, NULL) : 1.0;
         uint32_t m = pp.limits.maxImageDimension2D;
+        /* The title's option, when it set one before we got here (NFSU2
+         * loads it at boot, 1.5x by default): start at it rather than
+         * rebuilding every surface at the first flip. */
+        if (nv2a_vk_scale_pct >= 50)
+            k = nv2a_vk_scale_pct / 100.0;
         if (pp.limits.maxFramebufferWidth < m) m = pp.limits.maxFramebufferWidth;
         if (pp.limits.maxFramebufferHeight < m) m = pp.limits.maxFramebufferHeight;
         s_max_size = m ? m : 4096;

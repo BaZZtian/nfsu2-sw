@@ -427,6 +427,24 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   Colour_Calibration_Backing) covered list rows 5+: hidden after the
   screen is built (sub_00118CE0). Menu path on Linux: Main Menu -> right
   until Options (last, no wrap) -> a -> right (Video) -> a.
+- **Neon through the car (issue #32, 0.5.5-0.5.8, fixed 2026-10-14):**
+  Square Pixels widened surfaces by AA mode (aa_sx 1 -> 4/3 columns), but
+  depth_get keys depth by zeta *and* stored size. The garage draws the car
+  into the 1280x480 aa 2x1 back buffer and the neon into a 1280-wide target
+  without AA on the same Z -> different stored widths -> the neon got an
+  empty depth buffer. Now the 4/3 is by width only (w < 1280). Square
+  Pixels Off on the console confirmed it. The renderer also starts at the
+  option's scale (nv2a_vk_scale_pct, 1.5x default) instead of 1x + a
+  rescale at the first flip. Console save with the neon 240SX:
+  /root/nfsu2x/game_neon (Career -> Resume Career -> right x2 -> car select).
+- **Races/open world uncapped (2026-10-14, v0.5.9, recomp_manual.c
+  sub_002F22F0 wrapper):** NFSU2 sets D3D's presentation interval
+  (0x2F76FC) to 2 there; Present (sub_002EB4B0/002EB6A0) packs it into the
+  flip NOP trap word, (bits << 5) | 1 (bits 1/2/3 = 1/2/4 vblanks, 8 =
+  immediate when late), and sub_002F2080 case 1 schedules the flip that many
+  vblanks after the last. The PGRAPH wrapper rewrites the interval in
+  TRAPPED_DATA to 1 -> up to 60 fps. `NFSU2_FPS_CAP=30` keeps the title's.
+  Log `[fps] flip interval 2 -> 1 vblank (uncapped)`. Console confirmed.
 - **Off-screen batches skipped in the executor** (2026-10-05, nv2a_pb_exec.c,
   `RECOMP_CULL=0` off, `RECOMP_CULL_CHECK=1` verifies each rejection with
   the CPU interpreter, `RECOMP_CULL_TRACE=1` per program): the box of
