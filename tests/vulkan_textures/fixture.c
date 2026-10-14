@@ -69,7 +69,7 @@ int main(int argc,char **argv){
   batch.tex_va[0]=0x20000;s_batch=&batch;s_mips=1;
   memset(guest_memory+0x20000,0x55,16);
   r[0x1b00/4]=0x20000;r[0x1b04/4]=(0x0c<<8)|(2<<16)|(2<<20)|(2<<24);
-  r[0x1b0c/4]=0x40000000;
+  r[0x1b0c/4]=0x40000000|(1<<6);
   nv2a_vk_mips=0;bind_stage(r,0,scale,&desc,&sampled);
   CHECK(by_view(desc.imageView)->levels==1);
   nv2a_vk_mips=1;bind_stage(r,0,scale,&desc,&sampled);
@@ -82,12 +82,35 @@ int main(int argc,char **argv){
   clear_image_color(faces[0]->image,1,0,0,1);
   for(unsigned mode=0;mode<3;mode++){
    nv2a_vk_mips=mode==1;
-   VkImageView view=cube_from_surfaces(0x60000,4,4,64,faces);
+   VkImageView view=cube_from_surfaces(0x60000,4,4,64,faces,3);
    VkCube *cube=NULL;for(unsigned i=0;i<VK_MAX_CUBE;i++)if(s_cube[i].view==view)cube=&s_cube[i];
    CHECK(cube && cube->levels==(mode==1?3:1));
    uint32_t pixel;read_image(cube->image,1,1,mode==1?2:0,&pixel,4);
    CHECK(pixel==0xffff0000);
   }
+  nv2a_vk_mips=1;
+  VkImageView view=cube_from_surfaces(0x60000,4,4,64,faces,1);
+  VkCube *cube=NULL;for(unsigned i=0;i<VK_MAX_CUBE;i++)if(s_cube[i].view==view)cube=&s_cube[i];
+  CHECK(cube && cube->levels==1);
+#else
+  return 8;
+#endif
+ }else if(!strcmp(which,"lod-clamp")){
+#ifdef TEST_RUNTIME_MIPS
+  uint32_t r[2048]={0};Nv2aRawBatch batch={0};float scale[2];
+  VkDescriptorImageInfo a,b;VkSurf *sampled;
+  batch.tex_va[0]=0x20000;s_batch=&batch;s_mips=1;nv2a_vk_mips=1;
+  memset(guest_memory+0x20000,0x55,16);
+  r[0x1b00/4]=0x20000;r[0x1b04/4]=(0x0c<<8)|(2<<16)|(2<<20)|(2<<24);
+  r[0x1b0c/4]=0x40000000;r[0x1b14/4]=(6<<16)|(2<<24);
+  bind_stage(r,0,scale,&a,&sampled);CHECK(by_view(a.imageView)->levels==1);
+  r[0x1b0c/4]=0x40000000|(1<<6);
+  bind_stage(r,0,scale,&a,&sampled);CHECK(by_view(a.imageView)->levels==2);
+  r[0x1b0c/4]|=1<<18;bind_stage(r,0,scale,&b,&sampled);
+  CHECK(a.imageView==b.imageView && a.sampler!=b.sampler);
+  r[0x1b0c/4]=0x40000000|(0x3ff<<6)|(0x3ff<<18);
+  bind_stage(r,0,scale,&a,&sampled);
+  CHECK(a.sampler==b.sampler); /* Both clamps stop at the last real level. */
 #else
   return 8;
 #endif

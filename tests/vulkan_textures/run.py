@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='vulkan-textures-',dir=build) as folder:
   run(args.cxx,obj,*shader,args.vulkan_lib,args.glslang_lib,args.glslang_resources_lib,
    *(['-lwinpthread'] if os.name=='nt' else ['-lpthread']),'-o',exe)
   cases=['pitch','levels','mip-change','palette','depth','surface-aa']
-  if variant=='fixed':cases.append('runtime-mips')
+  if variant=='fixed':cases.extend(['runtime-mips','lod-clamp'])
   for case in cases:
    r=subprocess.run([str(exe),case],env=env,capture_output=True,text=True,timeout=30)
    assert r.returncode==(7 if variant=='baseline' else 0),(variant,case,r.returncode,r.stdout,r.stderr)
