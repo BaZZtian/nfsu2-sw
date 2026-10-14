@@ -18,8 +18,11 @@ The retail PAL chooser uses it to include the corresponding language row;
 it still waits for the player's choice. Unsupported Xbox locales fall back
 to English.
 
-The EU Video menu includes reflections, resolution scale, FPS display,
-FXAA, anisotropic filtering and square pixels, with saved preferences.
+The EU Video menu is available in the garage/main menu and during play
+through Pause → Options → Video. Both menus put Video directly after Audio.
+It includes the original screen-size slider, reflections, resolution scale,
+FPS display, FXAA, anisotropic filtering and square pixels. The six port
+settings share their saved preferences between both menus.
 Its labels follow the game's selected language. German labels include
 `Reflexionen`, `Auflösung` and `FPS-Anzeige`. Umlauts use the retail
 font's single-byte encoding. This reads the retail language state and
@@ -30,13 +33,32 @@ screen-size slider remains. EU picture defaults are FXAA off, texture filter
 off and square pixels off, with saved preferences taking precedence. In the
 EU build, turning the texture filter off also disables mip sampling; enabling
 it restores mipmaps. The existing US picture defaults remain unchanged.
+Texture filtering respects the game's minimum and maximum mip levels,
+including level-zero atlases and reflection cube chains.
 
 ## Performance baseline
 
-The default resolution scale is 1.5x in both builds. Higher resolutions
-require additional GPU performance and overclocking. Compare builds at the
-same resolution, renderer, picture settings and clocks. Actual frame rates
-depend on the scene and hardware settings.
+Recommended EU Vulkan settings:
+
+| Setting | Recommendation |
+| --- | --- |
+| Resolution | 1.5x |
+| Car reflections | On |
+| Anti-aliasing | Off |
+| Texture filter | Off |
+| Square pixels | Off |
+| FPS display | Optional |
+
+The Video page shows a recommendation and changes its caption to a
+performance notice when resolution exceeds 1.5x or anti-aliasing, texture
+filtering or square pixels are enabled. The notice updates immediately in
+either menu and does not block the selected settings. Reflections On at
+1.5x and the FPS display do not trigger it.
+
+The default resolution scale is 1.5x in both builds. Actual frame rates
+depend on the scene and hardware settings; stable 30 FPS is not guaranteed.
+Higher resolutions and additional picture effects increase GPU cost.
+Compare builds at the same resolution, renderer, settings and clocks.
 
 ## Generation and build
 
@@ -107,7 +129,12 @@ with a diagnostic instead of continuing the loading screen.
 
 ## Validation
 
-The full analysis/generation pipeline runs natively on Windows. A freshly generated EU translation produces an ELF and NRO with the shared current upstream renderer/runtime; reuse of the previous EU translation is also supported. This integration still needs a real Switch test. Previous PAL prototype observations do not establish stability or performance of this new build. Full playthrough and US hardware regression testing are pending.
+The full analysis/generation pipeline and Switch builds run natively on
+Windows. Existing and freshly generated EU translations produce an ELF and
+NRO with the shared runtime. EU driving, menus and the pause Video page have
+been tested on a real Nintendo Switch and reported playable. A full
+playthrough, US hardware regression testing and final on-device validation
+of the reordered menu/performance notice remain pending.
 
 `python tests/regions/run.py --cc clang --eu-xbe /path/to/EU/default.xbe` checks both build modes, detection and modified-input rejection. `python tests/switch_heap/run.py --cc clang` exercises the actual heap bootstrap. `python tests/vulkan_memory/run.py --cc clang` checks the renderer's allocation policy.
 
@@ -126,7 +153,9 @@ language selector's German branch. Explicit Switch abort/fatal paths commit
 their native caller offset to the log before termination.
 
 `tests/text_labels/run.py` checks the actual EU language-state reader and text
-patcher in US and EU modes, including pool boundaries and malformed chunks.
+patcher in US and EU modes, including recommendation captions, table ordering,
+repeatable updates, pool boundaries and malformed chunks. EU captions are
+added within the existing language-chunk allocation; disc files are not edited.
 
 `tests/vulkan_textures/run.py` checks texture bytes on a Vulkan GPU, including
 pitch, mip-count and palette changes, lower-mip updates, shared garage depth
