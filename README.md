@@ -30,6 +30,11 @@ detects mismatched game files before running the guest. See
 [PAL-EU setup and validation](pal/README.md). The game retains its normal
 language chooser.
 
+For EU Vulkan, start with **1.5x resolution, reflections On, anti-aliasing,
+texture filter and square pixels Off**. Video settings are also available
+from the pause menu. Higher-cost settings show a performance notice;
+stable 30 FPS is not guaranteed. See the [EU settings guide](pal/README.md#performance-baseline).
+
 ## ✨ Features
 
 - 🏁 **Native code**: the whole game runs as recompiled C, built with
