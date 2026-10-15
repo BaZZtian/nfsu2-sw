@@ -128,6 +128,11 @@ static VkExtent2D     s_sc_extent;
 static uint32_t       s_sc_count;
 static VkImage        s_sc_images[8];
 static VkImageView    s_sc_views[8];
+/* Signalled by the frame's submit, waited on by the present of the same
+ * image. Per image, not per frame: a frame's fence does not cover the
+ * presentation wait, so a per-frame semaphore could be re-signalled while
+ * the previous present still waits on it. */
+static VkSemaphore    s_sc_rendered[8];
 static int            s_headless;
 #if !defined(__SWITCH__)
 static SDL_Window    *s_win;
@@ -170,7 +175,7 @@ typedef struct {
     VkCommandPool   pool;
     VkCommandBuffer cb;
     VkFence         fence;
-    VkSemaphore     acquired, rendered;
+    VkSemaphore     acquired;
     VkBuffer        ring;
     VkDeviceMemory  ring_mem;
     uint8_t        *ring_ptr;
@@ -710,6 +715,7 @@ typedef struct {
     uint32_t va, color, w, h, pitch, hash, bytes;
     uint32_t face;              /* cube map: bytes per face; 0 = 2D */
     uint32_t levels;            /* mip levels in the image */
+    uint32_t palette_va, palette_reg;   /* format 0x0B: the palette it was decoded with */
     VkImage image; VkImageView view; VkDeviceMemory mem;
     VkFormat fmt;
     uint32_t used, checked;
@@ -1046,10 +1052,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
     VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;
     uint32_t layers = face ? 6 : 1, f, size;
 
+    if (s_have_bc && color == 0x0C) fmt = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    if (s_have_bc && color == 0x0E) fmt = VK_FORMAT_BC2_UNORM_BLOCK;
+    if (s_have_bc && color == 0x0F) fmt = VK_FORMAT_BC3_UNORM_BLOCK;
+
     for (i = s_tex_head[tex_bucket(va, color, w, h)]; i; i = s_tex_next[i - 1]) {
         VkTex *c = &s_tex[i - 1];
         if (c->image && c->va == va && c->color == color && c->w == w && c->h == h
-            && c->face == face) {
+            && c->face == face && c->pitch == pitch && c->levels == levels && c->fmt == fmt
+            && (color != 0x0B || (c->palette_va == s_palette_va && c->palette_reg == s_palette_reg))) {
             t = c;
             break;
         }
@@ -1058,7 +1069,17 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
         t->used = s_frame;
         return t->view;
     }
-    hash = bytes_hash(va, face ? face * 6 : tex_bytes(color, w, h, pitch));
+    size = tex_bytes(color, w, h, pitch);
+    if (!face && fmt != VK_FORMAT_B8G8R8A8_UNORM) {
+        /* DXT mip levels are uploaded from guest memory (they follow level 0),
+         * so a change to them alone must re-upload too. */
+        uint32_t lw = w, lh = h, level;
+        for (level = 1; level < levels; level++) {
+            lw = lw > 1 ? lw / 2 : 1; lh = lh > 1 ? lh / 2 : 1;
+            size += tex_bytes(color, lw, lh, 0);
+        }
+    }
+    hash = bytes_hash(va, face ? face * 6 : size);
     if (color == 0x0B)
         hash ^= bytes_hash(s_palette_va, 1024) * 31u;
     if (t && t->hash == hash) {
@@ -1072,13 +1093,6 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
     if (t && s_tex_changes)
         fprintf(stderr, "[tex] frame %u: %08X format %02X %ux%u changed\n",
                 s_frame, va, color, w, h);
-    if (s_have_bc && color == 0x0C) fmt = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
-    if (s_have_bc && color == 0x0E) fmt = VK_FORMAT_BC2_UNORM_BLOCK;
-    if (s_have_bc && color == 0x0F) fmt = VK_FORMAT_BC3_UNORM_BLOCK;
-    if (t && (t->fmt != fmt || t->pitch != pitch || t->levels != levels)) {
-        tex_free(t);
-        t = NULL;
-    }
     if (!t) {
         for (i = 0; i < VK_MAX_TEX; i++) {
             VkTex *c = &s_tex[i];
@@ -1090,6 +1104,7 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
             tex_free(t);
         t->va = va; t->color = color; t->w = w; t->h = h; t->pitch = pitch; t->fmt = fmt;
         t->face = face; t->levels = levels;
+        t->palette_va = s_palette_va; t->palette_reg = s_palette_reg;
         VT("texture %08X fmt %02X %ux%u pitch %u%s\n", va, color, w, h, pitch,
            face ? " cube" : "");
         if (!make_image_ml(w, h, layers, levels, fmt,
@@ -2139,6 +2154,11 @@ static int create_swapchain(void)
     s_sc_count = 8;
     vkGetSwapchainImagesKHR(s_dev, s_swapchain, &s_sc_count, s_sc_images);
     for (i = 0; i < s_sc_count; i++) {
+        if (!s_sc_rendered[i]) {
+            VkSemaphoreCreateInfo sci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+            if (vkCreateSemaphore(s_dev, &sci, NULL, &s_sc_rendered[i]) != VK_SUCCESS)
+                s_sc_rendered[i] = VK_NULL_HANDLE;
+        }
         VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
         vi.image = s_sc_images[i];
         vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -2440,7 +2460,6 @@ static int ready(void)
         vkAllocateCommandBuffers(s_dev, &cai, &f->cb);
         vkCreateFence(s_dev, &fci, NULL, &f->fence);
         vkCreateSemaphore(s_dev, &sci, NULL, &f->acquired);
-        vkCreateSemaphore(s_dev, &sci, NULL, &f->rendered);
         bci.size = RING_BYTES;
         bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -3945,7 +3964,7 @@ static void vk_flip(void)
         si.pWaitSemaphores = &s_f->acquired;
         si.pWaitDstStageMask = &ws;
         si.signalSemaphoreCount = 1;
-        si.pSignalSemaphores = &s_f->rendered;
+        si.pSignalSemaphores = &s_sc_rendered[idx];
     }
     if (vkQueueSubmit(s_queue, 1, &si, s_f->fence) != VK_SUCCESS)
         LOGE("vkQueueSubmit failed\n");
@@ -3954,7 +3973,7 @@ static void vk_flip(void)
         VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
         VkResult pr;
         pi.waitSemaphoreCount = 1;
-        pi.pWaitSemaphores = &s_f->rendered;
+        pi.pWaitSemaphores = &s_sc_rendered[idx];
         pi.swapchainCount = 1;
         pi.pSwapchains = &s_swapchain;
         pi.pImageIndices = &idx;
