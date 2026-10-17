@@ -297,7 +297,9 @@ typedef struct {
  * horizontal scale outright (a game option's rescale keeps the ratio).
  * s_square: widescreen shows the title's 640x480 at 16:9, so surfaces
  * narrower than 1280 get 4/3 more columns -- square pixels (races: 1.5x
- * -> 1280x720). The front end's 1280x480 (aa 2x1) is wide enough already.
+ * -> 1280x720), and surfaces 1280 or wider (the front end's 1280x480, aa
+ * 2x1) 2/3 of theirs: the same 16:9 picture, 1280x720 at 1.5x, not
+ * 1920x720 (the title's horizontal supersampling is dropped).
  * Decided by the width alone, never the AA mode: surfaces that share a zeta
  * buffer must get the same stored size, or depth_get hands the second one a
  * fresh, empty depth buffer. The garage draws the car into the 1280x480 aa
@@ -326,7 +328,7 @@ volatile int nv2a_vk_scale_pct;
  * by the device's image limits. */
 static void stored_size(uint32_t w, uint32_t h, uint32_t *pw, uint32_t *ph)
 {
-    double kx = s_scale_x * (s_square && w < 1280 ? 4.0 / 3.0 : 1.0), ky = s_scale;
+    double kx = s_scale_x * (s_square ? (w < 1280 ? 4.0 / 3.0 : 2.0 / 3.0) : 1.0), ky = s_scale;
     if (w * kx > (double)s_max_size)
         kx = (double)s_max_size / w;
     if (h * ky > (double)s_max_size)

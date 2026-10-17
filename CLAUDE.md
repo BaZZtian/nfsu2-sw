@@ -435,7 +435,9 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   empty depth buffer. Now the 4/3 is by width only (w < 1280). Square
   Pixels Off on the console confirmed it. The renderer also starts at the
   option's scale (nv2a_vk_scale_pct, 1.5x default) instead of 1x + a
-  rescale at the first flip. Console save with the neon 240SX:
+  rescale at the first flip. Square Pixels also gives surfaces >= 1280
+  wide 2/3 of the scale (2026-10-18): the 1280x480 aa 2x1 front end was
+  1920x720 at 1.5x, now 1280x720 like the races (FlatOut 2: by aa_sx). Console save with the neon 240SX:
   /root/nfsu2x/game_neon (Career -> Resume Career -> right x2 -> car select).
 - **Races/open world uncapped (2026-10-14, v0.5.9, recomp_manual.c
   sub_002F22F0 wrapper):** NFSU2 sets D3D's presentation interval
