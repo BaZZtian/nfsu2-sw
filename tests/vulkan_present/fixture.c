@@ -13,6 +13,7 @@ static const Nv2aBackend *backend; static uintptr_t pending[3], last_signal; sta
 static uintptr_t serial=0x10000, handles[256];
 static unsigned char mapping[16384];
 static unsigned overlay_copies;
+static unsigned semaphore_creations;
 static VkImageLayout layouts[3];
 #ifdef HAVE_FPS_OVERLAY
 extern volatile int nv2a_vk_fps_overlay;
@@ -455,6 +456,7 @@ VkResult vkCreateSemaphore(VkDevice                                    device,
     (void)pSemaphore;
     if(fail("vkCreateSemaphore"))return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     *pSemaphore=(VkSemaphore)add();
+    semaphore_creations++;
     return VK_SUCCESS;
 }
 VkResult vkCreateShaderModule(VkDevice                                    device,
@@ -1040,7 +1042,13 @@ int main(int argc,char **argv){
     }
     if (overlay_copies != (!strcmp(fault, "fps-toggle") ? 30u : !strcmp(fault, "fps-env") ? 90u : 0u))
         errors++;
+#ifdef HAVE_FPS_OVERLAY
+    /* Two acquire slots and three swapchain images: repeated initialization
+     * must not replace still-owned presentation semaphores or leak handles. */
+    if (semaphore_creations != 5) errors++;
+#endif
     printf("frames=%d errors=%d semaphore_reuse_violations=%u\n",submitted,errors,violations);
+    printf("semaphore_creations=%u\n", semaphore_creations);
     printf("overlay_copies=%u\n", overlay_copies);
     return errors?3:violations?4:0;
 }

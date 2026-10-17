@@ -860,7 +860,7 @@ typedef struct {
     uint32_t va, color, w, h, pitch, hash, bytes;
     uint32_t face;              /* cube map: bytes per face; 0 = 2D */
     uint32_t levels;            /* mip levels in the image */
-    uint32_t palette_va, palette_reg;
+    uint32_t palette_va, palette_reg;   /* format 0x0B: the palette it was decoded with */
     VkImage image; VkImageView view; VkDeviceMemory mem;
     VkFormat fmt;
     uint32_t used, checked;
@@ -1222,9 +1222,10 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
     }
     size = tex_bytes(color, w, h, pitch);
     if (!face && fmt != VK_FORMAT_B8G8R8A8_UNORM) {
-        /* Compressed mip levels come from guest memory, not gen_mips. */
-        uint32_t lw = w, lh = h;
-        for (uint32_t level = 1; level < levels; ++level) {
+        /* DXT mip levels are uploaded from guest memory (they follow level 0),
+         * so a change to them alone must re-upload too. */
+        uint32_t lw = w, lh = h, level;
+        for (level = 1; level < levels; level++) {
             lw = lw > 1 ? lw / 2 : 1; lh = lh > 1 ? lh / 2 : 1;
             size += tex_bytes(color, lw, lh, 0);
         }
@@ -2332,6 +2333,11 @@ static int create_swapchain(void)
     if (!s_sc_count || s_sc_count > 8)
         vk_require(VK_ERROR_UNKNOWN, "invalid swapchain image count");
     for (i = 0; i < s_sc_count; i++) {
+        if (!s_sc_rendered[i]) {
+            VkSemaphoreCreateInfo sci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+            vk_require(vkCreateSemaphore(s_dev, &sci, NULL, &s_sc_rendered[i]),
+                       "present image semaphore creation");
+        }
         VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
         vi.image = s_sc_images[i];
         vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -2646,12 +2652,6 @@ static int ready(void)
             LOGE("frame ring allocation failed\n");
             return 0;
         }
-    }
-    if (!s_headless) {
-        VkSemaphoreCreateInfo sci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-        for (i = 0; i < s_sc_count; ++i)
-            vk_require(vkCreateSemaphore(s_dev, &sci, NULL, &s_sc_rendered[i]),
-                       "present image semaphore creation");
     }
     s_fi = 0;
     frame_begin();
