@@ -447,6 +447,21 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   vblanks after the last. The PGRAPH wrapper rewrites the interval in
   TRAPPED_DATA to 1 -> up to 60 fps. `NFSU2_FPS_CAP=30` keeps the title's.
   Log `[fps] flip interval 2 -> 1 vblank (uncapped)`. Console confirmed.
+- **Renderer optimisations from PR #26 (2026-10-18, v0.5.12, nv2a_vk.c):**
+  (1) draws with the alpha test off/ALWAYS use a fragment shader without its
+  discard (`nv2a_gl_psh_no_alpha_test`, PipeKey.nat, made on first use;
+  vkpipes.bin records it in the old pad word) -> early Z; RECOMP_VK_NAT=0.
+  (2) `pass_barrier`: full barrier only after copies/clears/blits (and at
+  each command buffer start), an attachment/fragment barrier when the pass
+  depends on earlier draws, none otherwise; RECOMP_VK_SYNC=0 = every pass.
+  Race on lavapipe: 21 full -> 4 full + 11 gfx + 6 skipped per frame.
+  (3) present on a worker thread (Switch default, RECOMP_VK_ASYNC_PRESENT=0
+  off): NVK waits for the GPU inside vkQueuePresentKHR; present_drain()
+  before any queue/swapchain call. (4) uniform blocks/constants reused by
+  exact bytes within a command buffer, descriptors pushed only for changed
+  bindings (present_fxaa's push resets that); RECOMP_VK_STATE_CACHE=0.
+  Descriptor writes ~11.3k -> ~1.9k a frame. RECOMP_DRAW_STATS=1 shows all.
+  Console: renders correctly; fps A/B not measured yet.
 - **Off-screen batches skipped in the executor** (2026-10-05, nv2a_pb_exec.c,
   `RECOMP_CULL=0` off, `RECOMP_CULL_CHECK=1` verifies each rejection with
   the CPU interpreter, `RECOMP_CULL_TRACE=1` per program): the box of
