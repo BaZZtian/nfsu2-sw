@@ -4217,6 +4217,15 @@ static void vk_flip(void)
         char path[320];
         snprintf(path, sizeof path, "%s%05u.bmp", dump_prefix, s_frame);
         dump_surface(s, path);
+        if (getenv("RECOMP_VK_DUMP_ALL")) {     /* every surface, as <prefix><frame>_<va>.bmp */
+            int si;
+            for (si = 0; si < VK_MAX_SURF; si++)
+                if (s_surf[si].image && &s_surf[si] != s) {
+                    snprintf(path, sizeof path, "%s%05u_%08X.bmp", dump_prefix, s_frame, s_surf[si].va);
+                    barrier_all();
+                    dump_surface(&s_surf[si], path);
+                }
+        }
         if (s_headless && fxaa_on()) {
             snprintf(path, sizeof path, "%s%05u_fxaa.bmp", dump_prefix, s_frame);
             barrier_all();

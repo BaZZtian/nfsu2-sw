@@ -181,6 +181,15 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   edge still missed it. `u_surf.w` = 0.5 - 0.5*w/pw shifts positions so
   each title pixel's first real centre sits on i + 0.5. A/B at 2x: real
   row/column 1 mean 170 vs 30 without, flat with.
+  At k >= 2 no constant shift fits every edge (fixed 2026-10-19, v0.5.13,
+  VK only): square pixels at 1.5x store 2x columns, and an edge on a whole
+  title pixel landed on the centre of the last real column it should cover
+  -> the motion blur's 320x240 copies (0x82EBA380/0x82F05400 ring) lost
+  their last column, and the blur pulled black in at the right of the
+  screen, stronger with speed (Carbon had it too). NV2A_SNAP_VK_GLSL now
+  moves each position by the smallest d that gives 1x coverage (0 where
+  possible, half-pixel edges keep 0.5 - 0.5/k). `RECOMP_VK_DUMP_ALL=1`
+  dumps every surface next to each RECOMP_GL_DUMP frame.
 - prof.bin sample times are 16 bits of 10 ms and wrap every 655 s;
   prof_report.py unwraps them (--time on long runs was empty before).
 - **Files:** no `open()` on directories (`XBOX_DIR_FD` sentinel); FAT can't
@@ -447,6 +456,13 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   vblanks after the last. The PGRAPH wrapper rewrites the interval in
   TRAPPED_DATA to 1 -> up to 60 fps. `NFSU2_FPS_CAP=30` keeps the title's.
   Log `[fps] flip interval 2 -> 1 vblank (uncapped)`. Console confirmed.
+  Scripted camera sequences (NIS: race intro, entering/leaving shops)
+  step per frame and ran 2x fast uncapped (fixed 2026-10-19, v0.5.13):
+  the sequence object 0x38DBA0 has three "playing" slots +0x10/+0x28/+0x40
+  (sub_0003F540/sub_0003F760; found by diffing .data over a race intro);
+  while one is set the title's interval stays (`nis_playing`, log
+  `[fps] camera sequence playing/over`, NFSU2_NIS_CAP=0 off). Race intro
+  checked on Linux; shops on the console.
 - **Renderer optimisations from PR #26 (2026-10-18, v0.5.12, nv2a_vk.c):**
   (1) draws with the alpha test off/ALWAYS use a fragment shader without its
   discard (`nv2a_gl_psh_no_alpha_test`, PipeKey.nat, made on first use;
