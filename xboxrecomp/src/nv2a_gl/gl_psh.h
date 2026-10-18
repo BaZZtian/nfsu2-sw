@@ -23,4 +23,7 @@ extern int nv2a_shader_vk;
 /* Fragment shader source for `k`. Returns bytes written, -1 on overflow. */
 int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap);
 
+/* The same without the alpha test (ALPHA_TEST_ENABLE 0 or ALPHA_FUNC ALWAYS). */
+int nv2a_gl_psh_no_alpha_test(const Nv2aPshKey *k, char *buf, size_t cap);
+
 #endif

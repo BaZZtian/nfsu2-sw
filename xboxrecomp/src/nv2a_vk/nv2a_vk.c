@@ -191,6 +191,7 @@ static uint32_t s_fi;
 static VkCommandBuffer s_cb;   /* s_f->cb while recording */
 static uint32_t s_cb_gen;      /* bumped at every vkBeginCommandBuffer */
 static int s_dyn_valid;
+static int s_transfer_pending; /* see pass_barrier */
 
 static void garbage_add_pipe(VkPipeline pipe);
 static void garbage_add(VkImage img, VkImageView view, VkDeviceMemory mem)
@@ -242,6 +243,7 @@ static void frame_begin(void)
     s_cb = s_f->cb;
     s_cb_gen++;
     s_dyn_valid = 0;
+    s_transfer_pending = 1;
 }
 
 /* Space in this frame's ring: returns the offset, *ptr the mapping. */
@@ -278,6 +280,7 @@ typedef struct {
     uint32_t used;
     uint32_t aa_sx, aa_sy;
     int dirty;                 /* written since the last barrier */
+    int sampled;               /* read by a draw since the last barrier */
     uint32_t gen;              /* bumped by every draw and clear into it */
 } VkSurf;
 
@@ -285,6 +288,7 @@ typedef struct {
     uint32_t va, pw, ph;
     VkImage image; VkImageView view; VkDeviceMemory mem;
     uint32_t used;
+    int dirty;                 /* used as an attachment since the last barrier */
 } VkDepthBuf;
 
 #define VK_MAX_SURF 32
@@ -351,16 +355,77 @@ static int         s_in_render;
 static VkSurf     *s_rt;
 static VkDepthBuf *s_rt_depth;
 
+/* Barriers. Every one drains the GPU on NVK, so a pass only gets one when
+ * it depends on earlier work (RECOMP_VK_SYNC=0: before every pass, as it
+ * used to be):
+ *  - a copy, clear or blit since the last barrier (s_transfer_pending; also
+ *    set at the start of every command buffer) -> barrier_all;
+ *  - its colour surface or depth buffer was drawn into, or the surface was
+ *    sampled, since the last barrier, or the draw samples a surface drawn
+ *    into since then (s_read_pending) -> a barrier over the attachment and
+ *    fragment stages;
+ *  - otherwise (a surface not touched since the last barrier: the cube
+ *    faces, reflection targets, ...) none.
+ * Both kinds cover every image, so either one clears all the flags. */
+static int s_read_pending;
+static uint32_t s_st_bar_full, s_st_bar_gfx, s_st_bar_skip;
+
+static void barrier_flags_clear(void)
+{
+    int i;
+    for (i = 0; i < VK_MAX_SURF; i++)
+        s_surf[i].dirty = s_surf[i].sampled = 0;
+    for (i = 0; i < VK_MAX_DEPTH; i++)
+        s_depth[i].dirty = 0;
+    s_read_pending = 0;
+}
+
 static void barrier_all(void)
 {
     VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-    int i;
     mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     vkCmdPipelineBarrier(s_cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    for (i = 0; i < VK_MAX_SURF; i++)
-        s_surf[i].dirty = 0;
+    barrier_flags_clear();
+    s_transfer_pending = 0;
+    s_st_bar_full++;
+}
+
+/* Attachment writes -> later attachment use and fragment shader reads;
+ * fragment shader reads -> later attachment writes. */
+static void barrier_gfx(void)
+{
+    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    VkPipelineStageFlags st = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                              VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(s_cb, st, st, 0, 1, &mb, 0, NULL, 0, NULL);
+    barrier_flags_clear();
+    s_st_bar_gfx++;
+}
+
+/* Before a pass on s (and d): the barrier it needs, if any. */
+static void pass_barrier(VkSurf *s, VkDepthBuf *d)
+{
+    static int sync = -1;
+    if (sync < 0) {
+        const char *e = getenv("RECOMP_VK_SYNC");
+        sync = !(e && *e == '0');
+        fprintf(stderr, "  [VK] pass barriers: %s\n", sync ? "only where needed" : "every pass");
+    }
+    if (!sync || s_transfer_pending)
+        barrier_all();
+    else if (s_read_pending || s->dirty || s->sampled || (d && d->dirty))
+        barrier_gfx();
+    else
+        s_st_bar_skip++;
 }
 
 static void end_rendering(void)
@@ -416,7 +481,7 @@ static void begin_rendering(VkSurf *s, VkDepthBuf *d)
     if (s_in_render && s_rt == s && s_rt_depth == d)
         return;
     end_rendering();
-    barrier_all();
+    pass_barrier(s, d);
     ca.imageView = s->view;
     ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -442,6 +507,8 @@ static void begin_rendering(VkSurf *s, VkDepthBuf *d)
     s_in_render = 1;
     s_rt = s;
     s_rt_depth = d;
+    if (d)
+        d->dirty = 1;
     set_viewport(s->pw, s->ph);
 }
 
@@ -545,6 +612,7 @@ static void clear_image_color(VkImage img, float r, float g, float b, float a)
                                    VK_REMAINING_ARRAY_LAYERS };
     end_rendering();
     vkCmdClearColorImage(s_cb, img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &rg);
+    s_transfer_pending = 1;
 }
 
 static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uint32_t aa_sy)
@@ -638,6 +706,7 @@ static void rescale_surfaces(double k)
         bl.dstOffsets[1].z = 1;
         vkCmdBlitImage(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, img,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        s_transfer_pending = 1;
         garbage_add(s->image, s->view, s->mem);
         s->image = img; s->view = view; s->mem = mem;
         s->pw = pw; s->ph = ph;
@@ -684,6 +753,7 @@ static VkDepthBuf *depth_get(uint32_t va, uint32_t pw, uint32_t ph)
         VkClearDepthStencilValue z = { 1.0f, 0 };
         VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1 };
         vkCmdClearDepthStencilImage(s_cb, d->image, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
+        s_transfer_pending = 1;
     }
     if (s_trace)
         LOGE("depth 0x%08X %ux%u\n", va, pw, ph);
@@ -914,6 +984,7 @@ static void tex_copy_from_ring(VkTex *t, VkDeviceSize at, uint32_t row_texels,
     rg.imageExtent.height = t->h >> level ? t->h >> level : 1;
     rg.imageExtent.depth = 1;
     vkCmdCopyBufferToImage(s_cb, s_f->ring, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+    s_transfer_pending = 1;
 }
 
 /* Copy `bytes` at `src` (row length `row_texels`, 0 = tight) into the image. */
@@ -958,6 +1029,7 @@ static void gen_mips(VkImage img, uint32_t w, uint32_t h, uint32_t levels, uint3
         bl.dstOffsets[1].z = 1;
         vkCmdBlitImage(s_cb, img, VK_IMAGE_LAYOUT_GENERAL, img,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        s_transfer_pending = 1;
     }
 }
 
@@ -1212,6 +1284,7 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         bl.dstOffsets[1].z = 1;
         vkCmdBlitImage(s_cb, sf->image, VK_IMAGE_LAYOUT_GENERAL, c->image,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        s_transfer_pending = 1;
         c->src[f] = sf;
         c->gen[f] = sf->gen;
     }
@@ -1402,6 +1475,7 @@ typedef struct {
     uint64_t   vkey;
     Nv2aPshKey pkey;
     VkShaderModule vs, fs;
+    VkShaderModule fs_nat;      /* fs without the alpha test, made on first use */
     uint32_t   used;
     uint32_t   hash;
     int        next;
@@ -1756,6 +1830,7 @@ static VkProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
         pipes_forget_prog((int)(p - s_prog));
         vkDestroyShaderModule(s_dev, p->vs, NULL);
         vkDestroyShaderModule(s_dev, p->fs, NULL);
+        if (p->fs_nat) vkDestroyShaderModule(s_dev, p->fs_nat, NULL);
         s_prog_live--;
     }
     memset(p, 0, sizeof *p);
@@ -1794,9 +1869,11 @@ static VkProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     return p;
 }
 
+/* nat: the alpha test is off (or ALWAYS), so the fragment shader is the
+ * one without its discard -- early depth testing stays possible. */
 typedef struct {
     int      prog;
-    uint32_t blend, bsrc, bdst, beq, cmask, depth, topo;
+    uint32_t blend, bsrc, bdst, beq, cmask, depth, topo, nat;
 } PipeKey;
 
 typedef struct {
@@ -1867,7 +1944,7 @@ static VkBlendOp blend_op(uint32_t v)
  * state. */
 #define PIPE_REC_MAGIC 0x4C504B56u              /* "VKPL" */
 typedef struct {
-    uint32_t   magic, pad;
+    uint32_t   magic, nat;                      /* nat: was zero padding */
     uint64_t   vkey;
     Nv2aPshKey pk;
     uint32_t   blend, bsrc, bdst, beq, cmask, depth, topo;
@@ -1883,6 +1960,7 @@ static void pipe_rec_append(const PipeKey *k)
         return;
     memset(&rec, 0, sizeof rec);
     rec.magic = PIPE_REC_MAGIC;
+    rec.nat = k->nat;
     rec.vkey = s_prog[k->prog].vkey;
     rec.pk = s_prog[k->prog].pkey;
     rec.blend = k->blend; rec.bsrc = k->bsrc; rec.bdst = k->bdst; rec.beq = k->beq;
@@ -1938,6 +2016,15 @@ static VkPipeline pipe_get(const PipeKey *k)
     st[0].pName = "main";
     st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     st[1].module = p->fs;
+    if (k->nat) {
+        if (!p->fs_nat) {
+            static char fsrc[64 * 1024];
+            if (nv2a_gl_psh_no_alpha_test(&p->pkey, fsrc, sizeof fsrc) >= 0)
+                p->fs_nat = compile(GLSLANG_STAGE_FRAGMENT, fsrc);
+        }
+        if (p->fs_nat)
+            st[1].module = p->fs_nat;
+    }
     st[1].pName = "main";
     ia.topology = k->topo == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
                 : k->topo == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
@@ -2083,6 +2170,7 @@ static void prewarm(void)
             k.prog = (int)(p - s_prog);
             k.blend = pr.blend; k.bsrc = pr.bsrc; k.bdst = pr.bdst; k.beq = pr.beq;
             k.cmask = pr.cmask; k.depth = pr.depth; k.topo = pr.topo;
+            k.nat = pr.nat ? 1 : 0;
             if (pipe_get(&k))
                 npipe++;
         }
@@ -2502,10 +2590,12 @@ static int ready(void)
 
 /* Submit what is recorded and wait for it, then keep recording in the same
  * frame (ring full). */
+static void present_drain(void);
 static void flush_frame_wait(void)
 {
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    present_drain();
     end_rendering();
     s_rt = NULL;
     vkEndCommandBuffer(s_cb);
@@ -2521,6 +2611,7 @@ static void flush_frame_wait(void)
     vkBeginCommandBuffer(s_cb, &bi);
     s_cb_gen++;
     s_dyn_valid = 0;
+    s_transfer_pending = 1;
 }
 
 /* ── Render state ─────────────────────────────────────────────────── */
@@ -2973,6 +3064,110 @@ typedef struct {
 #define VK_INST_MAX   16                    /* gl_vsh.c: c[192 * 16] */
 #define VK_CONST_SIZE (192 * 16)
 
+/* ── Reusing uniforms and descriptors within a command buffer ─────────
+ *
+ * A draw's VsBlock/FsBlock and 192 constants often equal an earlier draw's
+ * (the HUD, post-processing, passes over one object), so they are looked up
+ * by their exact bytes among this command buffer's uploads and the earlier
+ * ring offset is used again; descriptors are pushed only for the bindings
+ * whose buffer, offset, view or sampler changed (push descriptors keep the
+ * rest until another layout's push disturbs them: present_fxaa). Less ring,
+ * fewer NVK descriptor writes. RECOMP_VK_STATE_CACHE=0 off. */
+#define UCACHE_BYTES 512
+#define UCACHE_SLOTS 64
+typedef struct {
+    uint32_t     cb_gen, hash, bytes;
+    VkDeviceSize at;
+    uint8_t      v[UCACHE_BYTES];
+} UCacheEnt;
+static UCacheEnt s_ucache[UCACHE_SLOTS];
+static int s_cache_on = -1;
+static uint32_t s_st_uhit, s_st_umiss, s_st_chit, s_st_desc, s_st_desc_saved;
+static uint32_t s_const_gen, s_const_cb_gen;
+static VkDeviceSize s_const_at;
+static uint8_t s_const_last[VK_CONST_SIZE];
+static uint32_t s_desc_cb_gen;              /* 0: nothing pushed for s_layout yet */
+
+static int cache_on(void)
+{
+    if (s_cache_on < 0) {
+        const char *e = getenv("RECOMP_VK_STATE_CACHE");
+        s_cache_on = !(e && *e == '0');
+    }
+    return s_cache_on;
+}
+
+/* `bytes` (<= UCACHE_BYTES) as a uniform block in this frame's ring. */
+static int uniform_upload(const void *v, uint32_t bytes, VkDeviceSize *at)
+{
+    UCacheEnt *e = NULL;
+    void *map;
+    if (cache_on()) {
+        const uint8_t *b = (const uint8_t *)v;
+        uint32_t h = 2166136261u ^ bytes, i, w;
+        for (i = 0; i + 4 <= bytes; i += 4) {
+            memcpy(&w, b + i, 4);
+            h = (h ^ w) * 16777619u;
+        }
+        e = &s_ucache[(h ^ (h >> 16)) & (UCACHE_SLOTS - 1)];
+        if (e->cb_gen == s_cb_gen && e->hash == h && e->bytes == bytes && !memcmp(e->v, v, bytes)) {
+            *at = e->at;
+            s_st_uhit++;
+            return 1;
+        }
+        e->hash = h;
+    }
+    *at = ring_alloc(bytes, s_ubo_align, &map);
+    if (!map)
+        return 0;
+    memcpy(map, v, bytes);
+    if (e) {
+        memcpy(e->v, v, bytes);
+        e->bytes = bytes;
+        e->at = *at;
+        e->cb_gen = s_cb_gen;               /* after ring_alloc: it may flush */
+    }
+    s_st_umiss++;
+    return 1;
+}
+
+static void push_draw_descriptors(const VkWriteDescriptorSet wr[7])
+{
+    static VkDescriptorBufferInfo lb[7];
+    static VkDescriptorImageInfo  li[7];
+    VkWriteDescriptorSet out[7];
+    uint32_t i, n = 0;
+    if (!cache_on() || s_desc_cb_gen != s_cb_gen) {
+        p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_layout, 0, 7, wr);
+        for (i = 0; i < 7; i++) {
+            if (wr[i].pBufferInfo) lb[i] = *wr[i].pBufferInfo;
+            if (wr[i].pImageInfo) li[i] = *wr[i].pImageInfo;
+        }
+        s_desc_cb_gen = s_cb_gen;
+        s_st_desc += 7;
+        return;
+    }
+    for (i = 0; i < 7; i++) {
+        if (wr[i].pBufferInfo) {
+            const VkDescriptorBufferInfo *b = wr[i].pBufferInfo;
+            if (lb[i].buffer == b->buffer && lb[i].offset == b->offset && lb[i].range == b->range)
+                continue;
+            lb[i] = *b;
+        } else {
+            const VkDescriptorImageInfo *m = wr[i].pImageInfo;
+            if (li[i].sampler == m->sampler && li[i].imageView == m->imageView
+                && li[i].imageLayout == m->imageLayout)
+                continue;
+            li[i] = *m;
+        }
+        out[n++] = wr[i];
+    }
+    if (n)
+        p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_layout, 0, n, out);
+    s_st_desc += n;
+    s_st_desc_saved += 7 - n;
+}
+
 extern uint8_t *nv2a_pb_reg_dirty(void);
 static uint32_t s_regs_seen[0x2000 / 4];    /* registers as of the last draw */
 
@@ -3129,6 +3324,7 @@ static int pend_append(const Nv2aRawBatch *b, int changed)
     if (!map)
         return 0;
     memcpy(map, b->vp_consts, VK_CONST_SIZE);
+    s_const_gen = 0;                            /* the last constants are these now */
     s_pend.count++;
     s_st_inst++;
     return 1;
@@ -3203,6 +3399,7 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
     for (i = 0; i < 4; i++)
         if (sampled[i] && sampled[i]->dirty && sampled[i] != s) {
             end_rendering();                 /* next begin_rendering barriers */
+            s_read_pending = 1;
             break;
         }
 
@@ -3221,6 +3418,15 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
     }
     key.depth = d != NULL;
     key.topo = cls;
+    /* ALPHA_TEST_ENABLE off or ALPHA_FUNC ALWAYS (RECOMP_VK_NAT=0: never). */
+    {
+        static int nat_env = -1;
+        if (nat_env < 0) {
+            const char *e = getenv("RECOMP_VK_NAT");
+            nat_env = !(e && *e == '0');
+        }
+        key.nat = nat_env && (!r[0x300 / 4] || r[0x33C / 4] == 0x207);
+    }
     pipe = pipe_get(&key);
     if (!pipe)
         return;
@@ -3246,6 +3452,9 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
     begin_rendering(s, d);
     s->dirty = 1;
     s->gen++;
+    for (i = 0; i < 4; i++)
+        if (sampled[i] && sampled[i] != s)
+            sampled[i]->sampled = 1;
     if (pipe != cur_pipe || cur_pipe_gen != s_cb_gen) {
         vkCmdBindPipeline(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
         cur_pipe = pipe;
@@ -3256,11 +3465,10 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
 
     /* Uniforms. */
     {
-        VsBlock *vb;
-        FsBlock *fb;
-        VkDeviceSize vat = ring_alloc(sizeof(VsBlock), s_ubo_align, &map);
-        vb = (VsBlock *)map;
-        if (!vb) return;
+        VsBlock vblock, *vb = &vblock;
+        FsBlock fblock, *fb = &fblock;
+        VkDeviceSize vat;
+        memset(vb, 0, sizeof *vb);
         vb->surf[0] = 2.0f / (float)s->w;
         vb->surf[1] = 2.0f / (float)s->h;
         vb->surf[2] = 1.0f / (float)zmax_of(r);
@@ -3271,14 +3479,13 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
         vb->aa[0] = b->aa_sx > 0 ? b->aa_sx : 1.0f;
         vb->aa[1] = b->aa_sy > 0 ? b->aa_sy : 1.0f;
         vb->xform = b->xform == 1 ? 1 : 0;
+        if (!uniform_upload(vb, sizeof *vb, &vat)) return;
         ub[0].buffer = s_f->ring;
         ub[0].offset = vat;
         ub[0].range = sizeof(VsBlock);
 
         {
-            VkDeviceSize fat = ring_alloc(sizeof(FsBlock), s_ubo_align, &map);
-            fb = (FsBlock *)map;
-            if (!fb) return;
+            VkDeviceSize fat;
             memset(fb, 0, sizeof *fb);
             for (i = 0; i < 4; i++) {
                 fb->tscale[i][0] = tscale[i][0];
@@ -3297,6 +3504,7 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
             }
             fb->afunc = r[0x300 / 4] ? (int32_t)r[0x33C / 4] : 0x207;
             fb->aref = (float)(r[0x340 / 4] & 0xFF);
+            if (!uniform_upload(fb, sizeof *fb, &fat)) return;
             ub[1].buffer = s_f->ring;
             ub[1].offset = fat;
             ub[1].range = sizeof(FsBlock);
@@ -3323,9 +3531,25 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
     }
     {
         /* Constants last: repeats append theirs right behind (pend_append). */
-        VkDeviceSize cat = ring_alloc(VK_CONST_SIZE, s_ubo_align, &map), range;
-        if (!map) return;
-        memcpy(map, b->vp_consts, VK_CONST_SIZE);
+        VkDeviceSize cat, range;
+        /* The same constants as the last upload in this command buffer:
+         * its offset again (a run held for instancing then cannot append
+         * behind it -- pend_append checks -- and draws one by one). */
+        if (cache_on() && s_const_gen && s_const_gen == b->vp_const_gen && s_const_cb_gen == s_cb_gen
+            && !memcmp(s_const_last, b->vp_consts, VK_CONST_SIZE)) {
+            cat = s_const_at;
+            s_st_chit++;
+        } else {
+            cat = ring_alloc(VK_CONST_SIZE, s_ubo_align, &map);
+            if (!map) return;
+            memcpy(map, b->vp_consts, VK_CONST_SIZE);
+            if (cache_on()) {
+                memcpy(s_const_last, b->vp_consts, VK_CONST_SIZE);
+                s_const_gen = b->vp_const_gen;
+                s_const_cb_gen = s_cb_gen;
+                s_const_at = cat;
+            }
+        }
         range = (VkDeviceSize)VK_CONST_SIZE * VK_INST_MAX;
         if (range > s_ubo_range) range = s_ubo_range;
         if (cat + range > RING_BYTES) range = RING_BYTES - cat;
@@ -3348,7 +3572,7 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
             wr[i].pImageInfo = &img[i - 2];
         }
     }
-    p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_layout, 0, 7, wr);
+    push_draw_descriptors(wr);
 
     VT("  vkCmdDrawIndexed %u\n", n);
     /* The constants were the ring's last allocation, so a repeat's set
@@ -3724,6 +3948,7 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
     wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     wr.pImageInfo = &ii;
     p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pp_layout, 0, 1, &wr);
+    s_desc_cb_gen = 0;                  /* s_layout's pushed set is disturbed */
     pc[0] = (float)dx; pc[1] = (float)dy; pc[2] = (float)dw; pc[3] = (float)dh;
     pc[4] = 1.0f / (float)s->pw; pc[5] = 1.0f / (float)s->ph; pc[6] = pc[7] = 0.0f;
     vkCmdPushConstants(s_cb, s_pp_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
@@ -3771,6 +3996,114 @@ static void dump_fxaa(VkSurf *s, const char *path)
  * elsewhere: the call is skipped. */
 extern void nv2a_host_frame_presented(uint32_t width, uint32_t height) __attribute__((weak));
 
+/* Asynchronous present (RECOMP_VK_ASYNC_PRESENT=0/1; on by default on the
+ * Switch): NVK's Switch WSI waits for the GPU to finish the frame inside
+ * vkQueuePresentKHR, which held the executor -- the title's pushbuffer --
+ * for that long every frame. A worker thread presents instead while the
+ * next frame is recorded. One present at a time; the queue and the
+ * swapchain are externally synchronized, so present_drain() waits for it
+ * before any other queue or swapchain call (acquire, submit, wait idle). */
+static struct {
+    pthread_mutex_t m;
+    pthread_cond_t  c;
+    pthread_t       t;
+    int             on, pending, done;
+    uint32_t        idx, pw, ph;
+    VkResult        result;
+} s_pres = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
+
+static void *present_thread(void *arg)
+{
+    (void)arg;
+    pthread_mutex_lock(&s_pres.m);
+    for (;;) {
+        VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+        uint32_t idx;
+        VkResult r;
+        while (!s_pres.pending || s_pres.done)
+            pthread_cond_wait(&s_pres.c, &s_pres.m);
+        idx = s_pres.idx;
+        pthread_mutex_unlock(&s_pres.m);
+        pi.waitSemaphoreCount = 1;
+        pi.pWaitSemaphores = &s_sc_rendered[idx];
+        pi.swapchainCount = 1;
+        pi.pSwapchains = &s_swapchain;
+        pi.pImageIndices = &idx;
+        r = vkQueuePresentKHR(s_queue, &pi);
+        pthread_mutex_lock(&s_pres.m);
+        s_pres.result = r;
+        s_pres.done = 1;
+        pthread_cond_broadcast(&s_pres.c);
+    }
+    return NULL;
+}
+
+static void present_result(VkResult r, uint32_t pw, uint32_t ph)
+{
+    if (nv2a_host_frame_presented)
+        nv2a_host_frame_presented(pw, ph);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
+        vkDeviceWaitIdle(s_dev);
+        create_swapchain();
+    }
+}
+
+static void present_drain(void)
+{
+    VkResult r;
+    uint32_t pw, ph;
+    if (!s_pres.on)
+        return;
+    pthread_mutex_lock(&s_pres.m);
+    if (!s_pres.pending) {
+        pthread_mutex_unlock(&s_pres.m);
+        return;
+    }
+    while (!s_pres.done)
+        pthread_cond_wait(&s_pres.c, &s_pres.m);
+    r = s_pres.result;
+    pw = s_pres.pw; ph = s_pres.ph;
+    s_pres.pending = s_pres.done = 0;
+    pthread_mutex_unlock(&s_pres.m);
+    present_result(r, pw, ph);
+}
+
+static void present_image(uint32_t idx, uint32_t pw, uint32_t ph)
+{
+    static int init;
+    if (!init) {
+        const char *e = getenv("RECOMP_VK_ASYNC_PRESENT");
+#if defined(__SWITCH__)
+        int want = !(e && *e == '0');
+#else
+        int want = e && *e == '1';
+#endif
+        pthread_attr_t at;
+        init = 1;
+        pthread_attr_init(&at);
+        pthread_attr_setstacksize(&at, 1u << 20);
+        s_pres.on = want && pthread_create(&s_pres.t, &at, present_thread, NULL) == 0;
+        pthread_attr_destroy(&at);
+        fprintf(stderr, "  [VK] present on %s\n", s_pres.on ? "a worker thread" : "the executor");
+    }
+    if (s_pres.on) {
+        pthread_mutex_lock(&s_pres.m);
+        s_pres.idx = idx; s_pres.pw = pw; s_pres.ph = ph;
+        s_pres.pending = 1;
+        s_pres.done = 0;
+        pthread_cond_broadcast(&s_pres.c);
+        pthread_mutex_unlock(&s_pres.m);
+    } else {
+        VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+        pi.waitSemaphoreCount = 1;
+        pi.pWaitSemaphores = &s_sc_rendered[idx];
+        pi.swapchainCount = 1;
+        pi.pSwapchains = &s_swapchain;
+        pi.pImageIndices = &idx;
+        present_result(vkQueuePresentKHR(s_queue, &pi), pw, ph);
+    }
+}
+
 static void vk_flip(void)
 {
     static int dump_every = -1;
@@ -3796,10 +4129,17 @@ static void vk_flip(void)
             st = e && *e == '1';
         }
         if (st && s_frame - st_frame >= 300) {
-            fprintf(stderr, "[vk] per frame: %u draws -> %u draw calls (%u instances appended)\n",
-                    s_st_draws / (s_frame - st_frame), s_st_calls / (s_frame - st_frame),
-                    s_st_inst / (s_frame - st_frame));
+            uint32_t nf = s_frame - st_frame;
+            fprintf(stderr, "[vk] per frame: %u draws -> %u draw calls (%u instances appended);"
+                    " barriers %u full, %u gfx, %u skipped; uniforms %u reused, %u new;"
+                    " constants %u reused; descriptors %u pushed, %u kept\n",
+                    s_st_draws / nf, s_st_calls / nf, s_st_inst / nf,
+                    s_st_bar_full / nf, s_st_bar_gfx / nf, s_st_bar_skip / nf,
+                    s_st_uhit / nf, s_st_umiss / nf, s_st_chit / nf,
+                    s_st_desc / nf, s_st_desc_saved / nf);
             s_st_draws = s_st_calls = s_st_inst = 0;
+            s_st_bar_full = s_st_bar_gfx = s_st_bar_skip = 0;
+            s_st_uhit = s_st_umiss = s_st_chit = s_st_desc = s_st_desc_saved = 0;
             st_frame = s_frame;
         }
     }
@@ -3877,6 +4217,15 @@ static void vk_flip(void)
         char path[320];
         snprintf(path, sizeof path, "%s%05u.bmp", dump_prefix, s_frame);
         dump_surface(s, path);
+        if (getenv("RECOMP_VK_DUMP_ALL")) {     /* every surface, as <prefix><frame>_<va>.bmp */
+            int si;
+            for (si = 0; si < VK_MAX_SURF; si++)
+                if (s_surf[si].image && &s_surf[si] != s) {
+                    snprintf(path, sizeof path, "%s%05u_%08X.bmp", dump_prefix, s_frame, s_surf[si].va);
+                    barrier_all();
+                    dump_surface(&s_surf[si], path);
+                }
+        }
         if (s_headless && fxaa_on()) {
             snprintf(path, sizeof path, "%s%05u_fxaa.bmp", dump_prefix, s_frame);
             barrier_all();
@@ -3886,6 +4235,7 @@ static void vk_flip(void)
     barrier_all();
 
     VT("flip %u: surface %08X drew %d, acquiring\n", s_frame, s ? s->va : 0, s_drew_any);
+    present_drain();
     if (!s_headless) {
         VkResult rr = vkAcquireNextImageKHR(s_dev, s_swapchain, UINT64_MAX, s_f->acquired,
                                             VK_NULL_HANDLE, &idx);
@@ -3972,21 +4322,8 @@ static void vk_flip(void)
         LOGE("vkQueueSubmit failed\n");
     s_f->submitted = 1;
     if (have_image) {
-        VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-        VkResult pr;
-        pi.waitSemaphoreCount = 1;
-        pi.pWaitSemaphores = &s_sc_rendered[idx];
-        pi.swapchainCount = 1;
-        pi.pSwapchains = &s_swapchain;
-        pi.pImageIndices = &idx;
         VT("flip %u: vkQueuePresentKHR\n", s_frame);
-        pr = vkQueuePresentKHR(s_queue, &pi);
-        if (nv2a_host_frame_presented)
-            nv2a_host_frame_presented(s && s_drew_any ? s->pw : 0, s && s_drew_any ? s->ph : 0);
-        if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
-            vkDeviceWaitIdle(s_dev);
-            create_swapchain();
-        }
+        present_image(idx, s && s_drew_any ? s->pw : 0, s && s_drew_any ? s->ph : 0);
     }
     {
         static uint64_t last_save;
