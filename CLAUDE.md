@@ -181,6 +181,15 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   edge still missed it. `u_surf.w` = 0.5 - 0.5*w/pw shifts positions so
   each title pixel's first real centre sits on i + 0.5. A/B at 2x: real
   row/column 1 mean 170 vs 30 without, flat with.
+  At k >= 2 no constant shift fits every edge (fixed 2026-10-19, v0.5.13,
+  VK only): square pixels at 1.5x store 2x columns, and an edge on a whole
+  title pixel landed on the centre of the last real column it should cover
+  -> the motion blur's 320x240 copies (0x82EBA380/0x82F05400 ring) lost
+  their last column, and the blur pulled black in at the right of the
+  screen, stronger with speed (Carbon had it too). NV2A_SNAP_VK_GLSL now
+  moves each position by the smallest d that gives 1x coverage (0 where
+  possible, half-pixel edges keep 0.5 - 0.5/k). `RECOMP_VK_DUMP_ALL=1`
+  dumps every surface next to each RECOMP_GL_DUMP frame.
 - prof.bin sample times are 16 bits of 10 ms and wrap every 655 s;
   prof_report.py unwraps them (--time on long runs was empty before).
 - **Files:** no `open()` on directories (`XBOX_DIR_FD` sentinel); FAT can't
@@ -435,7 +444,9 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   empty depth buffer. Now the 4/3 is by width only (w < 1280). Square
   Pixels Off on the console confirmed it. The renderer also starts at the
   option's scale (nv2a_vk_scale_pct, 1.5x default) instead of 1x + a
-  rescale at the first flip. Console save with the neon 240SX:
+  rescale at the first flip. Square Pixels also gives surfaces >= 1280
+  wide 2/3 of the scale (2026-10-18): the 1280x480 aa 2x1 front end was
+  1920x720 at 1.5x, now 1280x720 like the races (FlatOut 2: by aa_sx). Console save with the neon 240SX:
   /root/nfsu2x/game_neon (Career -> Resume Career -> right x2 -> car select).
 - **Races/open world uncapped (2026-10-14, v0.5.9, recomp_manual.c
   sub_002F22F0 wrapper):** NFSU2 sets D3D's presentation interval
@@ -445,6 +456,28 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   vblanks after the last. The PGRAPH wrapper rewrites the interval in
   TRAPPED_DATA to 1 -> up to 60 fps. `NFSU2_FPS_CAP=30` keeps the title's.
   Log `[fps] flip interval 2 -> 1 vblank (uncapped)`. Console confirmed.
+  Scripted camera sequences (NIS: race intro, entering/leaving shops)
+  step per frame and ran 2x fast uncapped (fixed 2026-10-19, v0.5.13):
+  the sequence object 0x38DBA0 has three "playing" slots +0x10/+0x28/+0x40
+  (sub_0003F540/sub_0003F760; found by diffing .data over a race intro);
+  while one is set the title's interval stays (`nis_playing`, log
+  `[fps] camera sequence playing/over`, NFSU2_NIS_CAP=0 off). Race intro
+  checked on Linux; shops on the console.
+- **Renderer optimisations from PR #26 (2026-10-18, v0.5.12, nv2a_vk.c):**
+  (1) draws with the alpha test off/ALWAYS use a fragment shader without its
+  discard (`nv2a_gl_psh_no_alpha_test`, PipeKey.nat, made on first use;
+  vkpipes.bin records it in the old pad word) -> early Z; RECOMP_VK_NAT=0.
+  (2) `pass_barrier`: full barrier only after copies/clears/blits (and at
+  each command buffer start), an attachment/fragment barrier when the pass
+  depends on earlier draws, none otherwise; RECOMP_VK_SYNC=0 = every pass.
+  Race on lavapipe: 21 full -> 4 full + 11 gfx + 6 skipped per frame.
+  (3) present on a worker thread (Switch default, RECOMP_VK_ASYNC_PRESENT=0
+  off): NVK waits for the GPU inside vkQueuePresentKHR; present_drain()
+  before any queue/swapchain call. (4) uniform blocks/constants reused by
+  exact bytes within a command buffer, descriptors pushed only for changed
+  bindings (present_fxaa's push resets that); RECOMP_VK_STATE_CACHE=0.
+  Descriptor writes ~11.3k -> ~1.9k a frame. RECOMP_DRAW_STATS=1 shows all.
+  Console: renders correctly; fps A/B not measured yet.
 - **Off-screen batches skipped in the executor** (2026-10-05, nv2a_pb_exec.c,
   `RECOMP_CULL=0` off, `RECOMP_CULL_CHECK=1` verifies each rejection with
   the CPU interpreter, `RECOMP_CULL_TRACE=1` per program): the box of

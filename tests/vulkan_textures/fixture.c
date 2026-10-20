@@ -62,6 +62,32 @@ int main(int argc,char **argv){
   VkSurf *a=surf_get(0x60000,1280,480,2,1);CHECK(a);VkImage original=a->image;
   clear_image_color(a->image,1,0,0,1);VkSurf *b=surf_get(0x60000,1280,480,1,1);
   CHECK(b->image==original);uint32_t pixel;read_image(b->image,1,1,0,&pixel,4);CHECK(pixel==0xffff0000);
+ }else if(!strcmp(which,"square-size")){
+#ifdef TEST_RUNTIME_MIPS
+  const double scales[]={1.0,1.5,2.0,2.5};
+  const uint32_t widths[]={853,1280,1707,2133},heights[]={480,720,960,1200};
+  const uint32_t wide_widths[]={1280,1920,2560,3200};
+  for(unsigned i=0;i<4;i++){
+   uint32_t w,h;s_scale=s_scale_x=scales[i];s_square=1;
+   stored_size(1280,480,&w,&h);CHECK(w==widths[i] && h==heights[i]);
+   stored_size(640,480,&w,&h);CHECK(w==widths[i] && h==heights[i]);
+   s_square=0;stored_size(1280,480,&w,&h);CHECK(w==wide_widths[i] && h==heights[i]);
+  }
+#else
+  return 8;
+#endif
+ }else if(!strcmp(which,"alpha-variants")){
+#ifdef TEST_RUNTIME_MIPS
+  Nv2aRawBatch batch={0};Nv2aPshKey pk={0};PipeKey key={0};
+  VkProg *p=prog_get(&batch,&pk);CHECK(p && p->fs && !p->fs_no_alpha_test);
+  key.prog=(int)(p-s_prog);key.cmask=15;key.topo=2;
+  CHECK(pipe_get(&key) && !p->fs_no_alpha_test);
+  key.no_alpha_test=1;VkPipeline first=pipe_get(&key);CHECK(first && p->fs_no_alpha_test);
+  VkShaderModule module=p->fs_no_alpha_test;
+  CHECK(pipe_get(&key)==first && p->fs_no_alpha_test==module);
+#else
+  return 8;
+#endif
  }else if(!strcmp(which,"runtime-mips")){
 #ifdef TEST_RUNTIME_MIPS
   uint32_t r[2048]={0};Nv2aRawBatch batch={0};float scale[2];

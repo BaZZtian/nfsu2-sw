@@ -210,6 +210,7 @@ static uint32_t s_fi;
 static VkCommandBuffer s_cb;   /* s_f->cb while recording */
 static uint32_t s_cb_gen;      /* bumped at every vkBeginCommandBuffer */
 static int s_dyn_valid;
+static int s_transfer_pending;
 
 static void garbage_add_pipe(VkPipeline pipe);
 static void garbage_add(VkImage img, VkImageView view, VkDeviceMemory mem)
@@ -261,6 +262,7 @@ static void frame_begin(void)
     s_cb = s_f->cb;
     s_cb_gen++;
     s_dyn_valid = 0;
+    s_transfer_pending = 1;
 }
 
 /* Space in this frame's ring: returns the offset, *ptr the mapping. */
@@ -320,7 +322,9 @@ typedef struct {
  * horizontal scale outright (a game option's rescale keeps the ratio).
  * s_square: widescreen shows the title's 640x480 at 16:9, so surfaces
  * narrower than 1280 get 4/3 more columns -- square pixels (races: 1.5x
- * -> 1280x720). The front end's 1280x480 (aa 2x1) is wide enough already.
+ * -> 1280x720), and surfaces 1280 or wider (the front end's 1280x480, aa
+ * 2x1) 2/3 of theirs: the same 16:9 picture, 1280x720 at 1.5x, not
+ * 1920x720 (the title's horizontal supersampling is dropped).
  * Decided by the width alone, never the AA mode: surfaces that share a zeta
  * buffer must get the same stored size, or depth_get hands the second one a
  * fresh, empty depth buffer. The garage draws the car into the 1280x480 aa
@@ -349,7 +353,7 @@ volatile int nv2a_vk_scale_pct;
  * by the device's image limits. */
 static void stored_size(uint32_t w, uint32_t h, uint32_t *pw, uint32_t *ph)
 {
-    double kx = s_scale_x * (s_square && w < 1280 ? 4.0 / 3.0 : 1.0), ky = s_scale;
+    double kx = s_scale_x * (s_square ? (w < 1280 ? 4.0 / 3.0 : 2.0 / 3.0) : 1.0), ky = s_scale;
     if (w * kx > (double)s_max_size)
         kx = (double)s_max_size / w;
     if (h * ky > (double)s_max_size)
@@ -366,7 +370,6 @@ static uint32_t to_stored(uint32_t v, uint32_t p, uint32_t l)
 }
 static VkSurf     s_surf[VK_MAX_SURF];
 static VkDepthBuf s_depth[VK_MAX_DEPTH];
-static int s_transfer_pending;
 static uint32_t s_sync_full, s_sync_attachments, s_sync_independent, s_sync_reads;
 static VkSurf    *s_last;
 
@@ -1943,9 +1946,7 @@ static VkProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
         return NULL;
     p->vs = compile(GLSLANG_STAGE_VERTEX, vsrc);
     p->fs = compile(GLSLANG_STAGE_FRAGMENT, fsrc);
-    if (nv2a_gl_psh_no_alpha_test(pk, fsrc, sizeof fsrc) >= 0)
-        p->fs_no_alpha_test = compile(GLSLANG_STAGE_FRAGMENT, fsrc);
-    if (!p->vs || !p->fs || !p->fs_no_alpha_test) {
+    if (!p->vs || !p->fs) {
         if (p->vs) vkDestroyShaderModule(s_dev, p->vs, NULL);
         if (p->fs) vkDestroyShaderModule(s_dev, p->fs, NULL);
         if (p->fs_no_alpha_test) vkDestroyShaderModule(s_dev, p->fs_no_alpha_test, NULL);
@@ -2110,7 +2111,16 @@ static VkPipeline pipe_get(const PipeKey *k)
     st[0].module = p->vs;
     st[0].pName = "main";
     st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    st[1].module = k->no_alpha_test ? p->fs_no_alpha_test : p->fs;
+    st[1].module = p->fs;
+    if (k->no_alpha_test) {
+        if (!p->fs_no_alpha_test) {
+            static char fsrc[64 * 1024];
+            if (nv2a_gl_psh_no_alpha_test(&p->pkey, fsrc, sizeof fsrc) >= 0)
+                p->fs_no_alpha_test = compile(GLSLANG_STAGE_FRAGMENT, fsrc);
+        }
+        if (p->fs_no_alpha_test)
+            st[1].module = p->fs_no_alpha_test;
+    }
     st[1].pName = "main";
     ia.topology = k->topo == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
                 : k->topo == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
@@ -2700,6 +2710,7 @@ static void flush_frame_wait(void)
     vk_require(vkBeginCommandBuffer(s_cb, &bi), "ring command begin");
     s_cb_gen++;
     s_dyn_valid = 0;
+    s_transfer_pending = 1;
 }
 
 /* ── Render state ─────────────────────────────────────────────────── */
@@ -3400,7 +3411,14 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
         key.cmask = m;
     }
     /* Alpha blending is independent: keep its pipeline state unchanged. */
-    key.no_alpha_test = !r[0x300 / 4] || r[0x33C / 4] == 0x207;
+    {
+        static int nat = -1;
+        if (nat < 0) {
+            const char *e = getenv("RECOMP_VK_NAT");
+            nat = !(e && *e == '0');
+        }
+        key.no_alpha_test = nat && (!r[0x300 / 4] || r[0x33C / 4] == 0x207);
+    }
     key.depth = d != NULL;
     key.topo = cls;
     pipe = pipe_get(&key);
@@ -4122,6 +4140,15 @@ static void vk_flip(void)
         char path[320];
         snprintf(path, sizeof path, "%s%05u.bmp", dump_prefix, s_frame);
         dump_surface(s, path);
+        if (getenv("RECOMP_VK_DUMP_ALL")) {     /* every surface, as <prefix><frame>_<va>.bmp */
+            int si;
+            for (si = 0; si < VK_MAX_SURF; si++)
+                if (s_surf[si].image && &s_surf[si] != s) {
+                    snprintf(path, sizeof path, "%s%05u_%08X.bmp", dump_prefix, s_frame, s_surf[si].va);
+                    barrier_all();
+                    dump_surface(&s_surf[si], path);
+                }
+        }
         if (s_headless && fxaa_on()) {
             snprintf(path, sizeof path, "%s%05u_fxaa.bmp", dump_prefix, s_frame);
             barrier_all();

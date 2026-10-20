@@ -358,7 +358,8 @@ static int psh_emit(const Nv2aPshKey *k, char *buf, size_t cap, int alpha_test)
         emit(&o, "    fragColor = vec4(fA * fB + (1.0 - fA) * fC + fD, fG);\n");
     }
     emit(&o, "    fragColor = clamp(fragColor, 0.0, 1.0);\n");
-    if (alpha_test) emit(&o,
+    if (alpha_test)
+    emit(&o,
         "    float ar = fragColor.a * 255.0;\n"
         "    bool pass = true;\n"
         "    if (u_alpha_func == 0x200) pass = false;\n"
@@ -378,10 +379,10 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
     return psh_emit(k, buf, cap, 1);
 }
 
+/* The same shader without the alpha test's discard, for draws with the test
+ * off (or ALWAYS): a shader that can discard keeps the GPU from testing depth
+ * before it runs (early Z). Texture-kill discards stay. */
 int nv2a_gl_psh_no_alpha_test(const Nv2aPshKey *k, char *buf, size_t cap)
 {
-    /* Same texture/combiner arithmetic, without a uniform-dependent kill.
-     * Clip-plane kills remain. Never force early tests for alpha-tested
-     * geometry: discarded fragments must not update depth or stencil. */
     return psh_emit(k, buf, cap, 0);
 }

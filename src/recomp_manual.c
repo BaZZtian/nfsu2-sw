@@ -416,6 +416,30 @@ extern void nv2a_pb_trap_lock(void);
 extern void nv2a_pb_trap_unlock(void);
 extern void nv2a_pb_trap_taken(void);
 
+/* Scripted camera sequences (NIS: the race intro, entering and leaving
+ * shops) advance per frame, made for the title's 30 fps: uncapped they ran
+ * twice as fast. The sequence object at 0x38DBA0 has three "playing" slots,
+ * +0x10 / +0x28 / +0x40 (sub_0003F540 / sub_0003F760 test them; the race
+ * intro sets +0x10 from load to the countdown); while one is set the
+ * title's interval stays. NFSU2_NIS_CAP=0 uncaps them too. */
+static int nis_playing(void)
+{
+    static int on = -1, was;
+    int now;
+    if (on < 0) {
+        const char *e = getenv("NFSU2_NIS_CAP");
+        on = !(e && *e == '0');
+    }
+    if (!on)
+        return 0;
+    now = (MEM32(0x38DBB0) | MEM32(0x38DBC8) | MEM32(0x38DBE0)) != 0;
+    if (now != was) {
+        was = now;
+        fprintf(stderr, "[fps] camera sequence %s\n", now ? "playing: title's interval" : "over: uncapped");
+    }
+    return now;
+}
+
 void sub_002F22F0(void)
 {
     volatile uint32_t *nv = (volatile uint32_t *)XBOX_PTR(0xFD000000u);
@@ -427,7 +451,10 @@ void sub_002F22F0(void)
     nv2a_pb_trap_lock();
     nsource = nv[0x400108 / 4];
     uint32_t data = nv[0x400708 / 4];
-    uint32_t flip = nfsu2_flip_trap_data(nsource, nv[0x400704 / 4], data);
+    uint32_t flip = data;
+    if (nsource && (nv[0x400704 / 4] & 0xFFFFu) == 0x0100u
+        && (data & 0x1Fu) == 1u && ((data >> 5) & 7u) > 1u && !nis_playing())
+        flip = nfsu2_flip_trap_data(nsource, nv[0x400704 / 4], data);
     if (flip != data) nv[0x400708 / 4] = flip;
     sub_002F22F0_gen();
     nv2a_pb_flip_retired(MEM32(blk + 0x1BC) - head);   /* a flip queued on its vblank retires at once */

@@ -1,6 +1,6 @@
 """Check the shared US/EU flip policy without retail inputs."""
 from pathlib import Path
-import argparse,os,subprocess,tempfile
+import argparse,os,subprocess,tempfile,sys
 ROOT=Path(__file__).resolve().parents[2]
 ap=argparse.ArgumentParser();ap.add_argument('--cc',default='clang');args=ap.parse_args()
 code=r'''
@@ -32,3 +32,4 @@ with tempfile.TemporaryDirectory(prefix='frame-rate-',dir=build) as folder:
  env=os.environ.copy();env.pop('NFSU2_FPS_CAP',None)
  subprocess.run([str(exe)],env=env,check=True)
  subprocess.run([str(exe),'30'],env=env|{'NFSU2_FPS_CAP':'30'},check=True)
+subprocess.run([sys.executable,str(Path(__file__).with_name('nis.py')),'--cc',args.cc],check=True)
