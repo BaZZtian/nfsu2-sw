@@ -330,12 +330,6 @@ RECOMP_WIDESCREEN=0
 Still open: cube maps on OpenGL (Vulkan has them: car reflections), bump/dot-product texture modes, fixed-function
 lighting.
 
-## 📚 More
-
-- [`CLAUDE.md`](CLAUDE.md): detailed engineering notes
-- [`PERF_NOTES.md`](PERF_NOTES.md): performance work and measurements
-- [`VULKAN_NOTES.md`](VULKAN_NOTES.md): the Vulkan renderer
-
 <div align="center">
 <sub>Need for Speed and Underground are trademarks of Electronic Arts. This is
 an unofficial fan project, not affiliated with or endorsed by EA or Microsoft.</sub>
