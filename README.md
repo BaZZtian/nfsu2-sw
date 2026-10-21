@@ -327,9 +327,6 @@ lighting.
 
 ## 📚 More
 
-- [`CLAUDE.md`](CLAUDE.md): detailed engineering notes
-- [`PERF_NOTES.md`](PERF_NOTES.md): performance work and measurements
-- [`VULKAN_NOTES.md`](VULKAN_NOTES.md): the Vulkan renderer
 
 <div align="center">
 <sub>Need for Speed and Underground are trademarks of Electronic Arts. This is
