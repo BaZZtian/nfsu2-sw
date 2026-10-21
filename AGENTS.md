@@ -69,3 +69,9 @@ pull request, build, release, and Store/catalog submission.**
   established: **do not publish, package, merge, or submit a release**.
 - Do not bypass these rules to meet a deadline. This document is operational
   guidance only: it does not itself license, transfer, or revoke any copyright.
+
+## 4. Project-specific known rights (not a complete legal audit)
+
+- Contribution fork of `antoxa2584x/nfsu2-sw`. PAL/EU development does not confer copyright over the original Xbox-derived engine.
+- No general root LICENSE was verified in upstream or fork; **distribution status is unresolved** pending per-file permission, contribution and third-party dependency review. Do not relicense or republish based solely on public source visibility.
+- Game executables/assets and Electronic Arts rights are outside the fork's grants.
